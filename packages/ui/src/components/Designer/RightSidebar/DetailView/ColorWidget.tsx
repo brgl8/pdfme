@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { ColorPicker, Input, Space } from 'antd';
+import type { Color } from 'antd/es/color-picker';
 
 // form-render passes these props to a field widget. We override the built-in
 // `color` widget because form-render's bundled `rc-color-picker` relies on
@@ -28,11 +29,16 @@ const ColorWidget = (props: ColorWidgetProps) => {
   // disabledAlpha={false}, in which case 8-digit hex is intentional.
   const { value, onChange, disabled, disabledAlpha = true, readOnly, className, style } = props;
 
+  // Local color value that updates during dragging but doesn't trigger parent onChange
+  const [localColor, setLocalColor] = useState<string>(value ?? DEFAULT_COLOR);
+  
   // Keep a local copy so the text input stays responsive while the user types an
   // intermediate value (e.g. "#ff00") that is not yet a valid color.
   const [inputValue, setInputValue] = useState(value ?? '');
 
+  // Sync localColor when value prop changes from parent
   useEffect(() => {
+    setLocalColor(value ?? DEFAULT_COLOR);
     setInputValue(value ?? '');
   }, [value]);
 
@@ -42,6 +48,7 @@ const ColorWidget = (props: ColorWidgetProps) => {
 
   const commit = (next: string) => {
     setInputValue(next);
+    setLocalColor(next);
     if (isCommittableColor(next)) {
       onChange?.(next === '' ? undefined : next);
     }
@@ -50,11 +57,20 @@ const ColorWidget = (props: ColorWidgetProps) => {
   return (
     <Space.Compact style={style} block>
       <ColorPicker
-        value={value || DEFAULT_COLOR}
+        value={localColor}
         disabled={disabled}
         disabledAlpha={disabledAlpha}
-        format="hex"
-        onChange={(color) => commit(color.toHexString())}
+        onChange={(color: Color) => {
+          const hex = color.toHexString();
+          // Update local display values but don't trigger parent onChange yet
+          setLocalColor(hex);
+          setInputValue(hex);
+        }}
+        onChangeComplete={(color: Color) => {
+          const hex = color.toHexString();
+          // Now commit the final value to the parent
+          commit(hex);
+        }}
       />
       <Input
         className={className}
