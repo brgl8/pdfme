@@ -355,20 +355,23 @@ const styleOrAttribute = (
   attribute: string,
   def?: string,
 ): string => {
-  const value = style[attribute] || attributes[attribute];
-  if (!value && typeof def !== 'undefined') return def;
-  return value;
+  if (style && style[attribute] !== undefined) return style[attribute];
+  if (attributes && attributes[attribute] !== undefined) return attributes[attribute];
+  if (def) return def;
+  return '';
 };
 
-const parseStyles = (style: string): SVGStyle => {
-  const cssRegex = /([^:\s]+)\s*:\s*([^;]+)/g;
-  const css: SVGStyle = {};
-  let match = cssRegex.exec(style);
-  while (match != null) {
-    css[match[1]] = match[2];
-    match = cssRegex.exec(style);
-  }
-  return css;
+var parseStyles = (style: string): SVGStyle => {
+	if (!style) return {}; // Guard against undefined/null
+	
+	const cssRegex = /([^:\s]+)\s*:\s*([^;]+)/g;
+	const css: SVGStyle = {};
+	let match = cssRegex.exec(style);
+	while (match != null) {
+		css[match[1]] = match[2];
+		match = cssRegex.exec(style);
+	}
+	return css;
 };
 
 const parseColor = (
@@ -819,8 +822,12 @@ export const drawSvg = async (
   const size = page.getSize();
   const firstChild = parseHtml(svg).firstChild as HTMLElement;
 
-  const attributes = firstChild.attributes;
-  const style = parseStyles(attributes.style);
+  if (!firstChild || firstChild.nodeType !== 1) {
+		return;
+	}
+
+  const attributes = firstChild.attributes || {};
+  const style = attributes.style ? parseStyles(attributes.style) : {};
 
   const widthRaw = styleOrAttribute(attributes, style, 'width', '');
   const heightRaw = styleOrAttribute(attributes, style, 'height', '');
