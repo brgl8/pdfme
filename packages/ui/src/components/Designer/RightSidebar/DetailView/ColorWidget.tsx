@@ -50,7 +50,7 @@ const ColorWidget = (props: ColorWidgetProps) => {
     setInputValue(next);
     setLocalColor(next);
     if (isCommittableColor(next)) {
-      onChange?.(next === '' ? undefined : next);
+      onChange?.(next); //?.(next === '' ? undefined : next);
     }
   };
 
