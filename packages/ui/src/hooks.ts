@@ -717,6 +717,32 @@ export const useInitEvents = ({
         });
         copiedSchemas.current = pasteSchemas;
       },
+      pasteSpecial: () => {
+        if (!copiedSchemas.current || copiedSchemas.current.length === 0) return;
+        const schema = schemasList[pageCursor];
+        const stackUniqueSchemaNames: string[] = [];
+        const pasteSchemas = copiedSchemas.current.map((cs) => {
+          const id = uuid();
+          const name = getUniqueSchemaName({
+            copiedSchemaName: cs.name,
+            schema,
+            stackUniqueSchemaNames,
+          });
+          const { height, width, position: p } = cs;
+          const ps = pageSizes[pageCursor];
+          const position = {
+            x: p.x,
+            y: p.y,
+          };
+
+          return Object.assign(cloneDeep(cs), { id, name, position });
+        });
+        commitSchemas(schemasList[pageCursor].concat(pasteSchemas));
+        setTimeout(() => {
+          onEdit(getElementsByIds(pasteSchemas.map((s) => s.id)));
+        });
+        copiedSchemas.current = pasteSchemas;
+      },
       redo: () => timeTravel('redo'),
       undo: () => timeTravel('undo'),
       save: () =>
