@@ -7,7 +7,11 @@ import {
   getFallbackFontName,
   cloneDeep,
 } from '@pdfme/common';
-import type { Font as FontKitFont } from 'fontkit';
+import {
+  normalizeTableCellType,
+  normalizeTableImageHeight,
+  normalizeTableImageHeightMode,
+} from './imageCell.js';
 import type {
   TableSchema,
   CellStyle,
@@ -18,6 +22,7 @@ import type {
   Section,
 } from './types.js';
 import { Cell, Column, Row, Table } from './classes.js';
+import { createBoxDimension } from '../box.js';
 import { getTableBodyRange } from '../splitRange.js';
 
 type StyleProp = 'styles' | 'headStyles' | 'bodyStyles' | 'alternateRowStyles' | 'columnStyles';
@@ -140,9 +145,9 @@ function cellStyles(
     alignment: 'left',
     verticalAlignment: 'middle',
     fontSize: 10,
-    cellPadding: 5,
+    cellPadding: createBoxDimension(5),
     lineColor: '#000000',
-    lineWidth: 0,
+    lineWidth: createBoxDimension(0),
     minCellHeight: 0,
     minCellWidth: 0,
   };
@@ -150,7 +155,7 @@ function cellStyles(
 }
 
 function mapCellStyle(style: CellStyle): Partial<Styles> {
-  return {
+  const mapping: Partial<Styles> = {
     fontName: style.fontName,
     alignment: style.alignment,
     verticalAlignment: style.verticalAlignment,
@@ -164,28 +169,60 @@ function mapCellStyle(style: CellStyle): Partial<Styles> {
     lineWidth: style.borderWidth,
     cellPadding: style.padding,
   };
+  return Object.fromEntries(
+    Object.entries(mapping).filter(([, value]) => value !== undefined),
+  ) as Partial<Styles>;
 }
 
-function getTableOptions(schema: TableSchema, body: string[][]): UserOptions {
+function getTableOptions(
+  schema: TableSchema,
+  body: string[][],
+  cache: Map<string | number, unknown>,
+): UserOptions {
   const columnStylesWidth = schema.headWidthPercentages.reduce(
     (acc, cur, i) => ({ ...acc, [i]: { cellWidth: schema.width * (cur / 100) } }),
     {} as Record<number, Partial<Styles>>,
   );
 
-  const columnStylesAlignment = Object.entries(schema.columnStyles.alignment || {}).reduce(
+  const alignmentMap = schema.columnStyles.alignment || {};
+  const verticalAlignmentMap = schema.columnStyles.verticalAlignment || {};
+  const cellTypeMap = schema.columnStyles.cellType || {};
+  const imageHeightModeMap = schema.columnStyles.imageHeightMode || {};
+  const imageHeightMap = schema.columnStyles.imageHeight || {};
+  const columnStylesAlignment = Object.entries(alignmentMap).reduce(
     (acc, [key, value]) => ({ ...acc, [key]: { alignment: value } }),
+    {} as Record<number, Partial<Styles>>,
+  );
+  const columnStylesVerticalAlignment = Object.entries(verticalAlignmentMap).reduce(
+    (acc, [key, value]) => ({ ...acc, [key]: { verticalAlignment: value } }),
     {} as Record<number, Partial<Styles>>,
   );
 
   const allKeys = new Set([
     ...Object.keys(columnStylesWidth).map(Number),
     ...Object.keys(columnStylesAlignment).map(Number),
+    ...Object.keys(columnStylesVerticalAlignment).map(Number),
+    ...Object.keys(cellTypeMap).map(Number),
+    ...Object.keys(imageHeightModeMap).map(Number),
+    ...Object.keys(imageHeightMap).map(Number),
   ]);
   const columnStyles = Array.from(allKeys).reduce(
     (acc, key) => {
       const widthStyle = columnStylesWidth[key] || {};
       const alignmentStyle = columnStylesAlignment[key] || {};
-      return { ...acc, [key]: { ...widthStyle, ...alignmentStyle } };
+      const verticalAlignmentStyle = columnStylesVerticalAlignment[key] || {};
+      const cellType = normalizeTableCellType(cellTypeMap[key], key, cache);
+      const imageHeightMode = normalizeTableImageHeightMode(imageHeightModeMap[key]);
+      const imageHeight = normalizeTableImageHeight(imageHeightMap[key]);
+      const imageStyle: Partial<Styles> = {
+        ...(cellType ? { cellType } : {}),
+        ...(imageHeightMode ? { imageHeightMode } : {}),
+        ...(imageHeight !== undefined ? { imageHeight } : {}),
+      };
+      return {
+        ...acc,
+        [key]: { ...widthStyle, ...alignmentStyle, ...verticalAlignmentStyle, ...imageStyle },
+      };
     },
     {} as Record<number, Partial<Styles>>,
   );
@@ -234,14 +271,20 @@ function parseContent4Input(options: UserOptions) {
   return { columns, head, body };
 }
 
-function parseInput(schema: TableSchema, body: string[][]): TableInput {
-  const options = getTableOptions(schema, body);
+function parseInput(
+  schema: TableSchema,
+  body: string[][],
+  cache: Map<string | number, unknown>,
+  templateShowHead: boolean,
+): TableInput {
+  const options = getTableOptions(schema, body, cache);
   const styles = parseStyles(options);
   const settings = {
     startY: options.startY,
     margin: options.margin,
     tableWidth: options.tableWidth,
     showHead: options.showHead,
+    templateShowHead,
     tableLineWidth: options.tableLineWidth ?? 0,
     tableLineColor: options.tableLineColor ?? '',
   };
@@ -270,10 +313,12 @@ export function createSingleTable(body: string[][], args: CreateTableArgs) {
     schema.bodyStyles.alternateBackgroundColor = schema.bodyStyles.backgroundColor;
     schema.bodyStyles.backgroundColor = alternateBackgroundColor;
   }
+  // Captured before split segments hide the header. Auto limits must not follow that override.
+  const templateShowHead = schema.showHead !== false;
   schema.showHead =
     schema.showHead === false ? false : !schema.__isSplit || schema.repeatHead === true;
 
-  const input = parseInput(schema, body);
+  const input = parseInput(schema, body, _cache, templateShowHead);
 
   const font = options.font || getDefaultFont();
 
@@ -285,6 +330,7 @@ export function createSingleTable(body: string[][], args: CreateTableArgs) {
     input,
     content,
     font,
-    _cache: _cache as unknown as Map<string | number, FontKitFont>,
+    basePdf,
+    _cache,
   });
 }

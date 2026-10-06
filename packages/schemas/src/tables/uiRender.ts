@@ -2,8 +2,14 @@ import type { UIRenderProps, Mode } from '@pdfme/common';
 import type { TableSchema, CellStyle, Styles } from './types.js';
 import { px2mm, ZOOM } from '@pdfme/common';
 import { createSingleTable } from './tableHelper.js';
-import { getBody, getBodyWithSchemaRange } from './helper.js';
+import { getBody, getBodyWithSchemaRange, remapColumnStylesOnRemove } from './helper.js';
 import cell from './cell.js';
+import {
+  clearImagePickerRequest,
+  noteRenderingTable,
+  requestImagePicker,
+  tableSchemaKey,
+} from './imageCellUi.js';
 import { Row } from './classes.js';
 import { getTableBodyRange } from '../splitRange.js';
 
@@ -114,6 +120,7 @@ const drawBorder = (
   rowIndex: number,
   rowsLength: number,
   arg: UIRenderProps<TableSchema>,
+  bodyLength: number,
 ) => {
   const isFirstColumn = colIndex === 0;
   const isLastColumn = colIndex === Object.values(row.cells).length - 1;
@@ -123,7 +130,7 @@ const drawBorder = (
     setBorder(div, 'Top', arg);
     if (isFirstColumn) setBorder(div, 'Left', arg);
     if (isLastColumn) setBorder(div, 'Right', arg);
-    if ((JSON.parse(arg.value || '[]') as string[][]).length === 0) {
+    if (bodyLength === 0) {
       setBorder(div, 'Bottom', arg);
     }
   } else if (row.section === 'body') {
@@ -159,14 +166,37 @@ const renderRowUi = (args: {
       div.style.height = `${cell.height}mm`;
       div.style.boxSizing = 'border-box';
 
-      drawBorder(div, row, colIndex, rowIndex, rows.length, arg);
+      drawBorder(div, row, colIndex, rowIndex, rows.length, arg, value.length);
 
-      div.style.cursor =
-        arg.mode === 'designer' || (arg.mode === 'form' && section === 'body') ? 'text' : 'default';
+      const imageCellEditable =
+        arg.mode === 'designer' || (arg.mode === 'form' && !arg.schema.readOnly);
+      div.style.cursor = cell.isImage()
+        ? imageCellEditable && section === 'body'
+          ? 'pointer'
+          : 'default'
+        : arg.mode === 'designer' || (arg.mode === 'form' && section === 'body')
+          ? 'text'
+          : 'default';
 
       div.addEventListener('click', () => {
         if (arg.mode === 'viewer') return;
+        const enteringEmptyImageCell =
+          cell.isImage() &&
+          section === 'body' &&
+          imageCellEditable &&
+          cell.raw === '' &&
+          (editingPosition.rowIndex !== rowIndex || editingPosition.colIndex !== colIndex);
         onChangeEditingPosition({ rowIndex, colIndex });
+        // uiRender awaits table layout before painting, so this request is set after
+        // the editing-position reset inside onChangeEditingPosition and is still
+        // waiting when the editor mounts.
+        if (enteringEmptyImageCell) {
+          requestImagePicker({
+            rowIndex,
+            colIndex,
+            schemaKey: tableSchemaKey(arg.schema),
+          });
+        }
       });
       arg.rootElement.appendChild(div);
       const isEditing =
@@ -176,6 +206,11 @@ const renderRowUi = (args: {
         mode = section === 'body' && isEditing && !arg.schema.readOnly ? 'designer' : 'viewer';
       } else if (arg.mode === 'designer') {
         mode = isEditing ? 'designer' : 'form';
+      }
+      // Idle image cells stay in viewer so the file control is mounted only on the
+      // selected cell. Selecting one uses designer mode, which opens the editor.
+      if (cell.isImage() && !isEditing) {
+        mode = 'viewer';
       }
 
       void cellUiRender({
@@ -210,6 +245,10 @@ const renderRowUi = (args: {
           width: cell.width,
           height: cell.height,
           ...convertToCellStyle(cell.styles),
+          cellType: cell.isImage() ? 'image' : 'text',
+          columnIndex: colIndex,
+          rowIndex,
+          pickerSchemaKey: tableSchemaKey(arg.schema),
         },
       });
       colOffsetX += cell.width;
@@ -225,10 +264,12 @@ const resetEditingPosition = () => {
   headEditingPosition.colIndex = -1;
   bodyEditingPosition.rowIndex = -1;
   bodyEditingPosition.colIndex = -1;
+  clearImagePickerRequest();
 };
 
 export const uiRender = async (arg: UIRenderProps<TableSchema>) => {
   const { rootElement, onChange, schema, value, mode, scale } = arg;
+  noteRenderingTable(schema);
   const body = getBody(value);
   const bodyRange = getTableBodyRange(schema);
   const bodyWidthRange = getBodyWithSchemaRange(value, schema, bodyRange);
@@ -362,7 +403,6 @@ export const uiRender = async (arg: UIRenderProps<TableSchema>) => {
             0,
           );
 
-          // TODO Should also remove the deleted columnStyles when deleting
           onChange([
             { key: 'head', value: schema.head.filter((_, j) => j !== i) },
             {
@@ -374,6 +414,10 @@ export const uiRender = async (arg: UIRenderProps<TableSchema>) => {
             {
               key: 'content',
               value: JSON.stringify(bodyWidthRange.map((row) => row.filter((_, j) => j !== i))),
+            },
+            {
+              key: 'columnStyles',
+              value: remapColumnStylesOnRemove(schema.columnStyles ?? {}, i),
             },
           ]);
         },

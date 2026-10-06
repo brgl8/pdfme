@@ -119,11 +119,10 @@ test('useInitEvents paste ignores missing DOM nodes instead of storing null acti
   const commitSchemas = vi.fn();
   const removeSchemas = vi.fn();
   const onSaveTemplate = vi.fn();
-  const setSchemasList = vi.fn();
   const onEdit = vi.fn();
   const onEditEnd = vi.fn();
-  const past = { current: [] as SchemaForUI[][] };
-  const future = { current: [] as SchemaForUI[][] };
+  const undo = vi.fn();
+  const redo = vi.fn();
 
   let shortcuts: Parameters<typeof helper.initShortCuts>[0] | undefined;
 
@@ -145,9 +144,8 @@ test('useInitEvents paste ignores missing DOM nodes instead of storing null acti
       commitSchemas,
       removeSchemas,
       onSaveTemplate,
-      past,
-      future,
-      setSchemasList,
+      undo,
+      redo,
       onEdit,
       onEditEnd,
     }),
@@ -163,6 +161,14 @@ test('useInitEvents paste ignores missing DOM nodes instead of storing null acti
 
   expect(commitSchemas).toHaveBeenCalledTimes(1);
   expect(onEdit).toHaveBeenCalledWith([]);
+
+  act(() => {
+    shortcuts!.undo();
+    shortcuts!.redo();
+  });
+
+  expect(undo).toHaveBeenCalledTimes(1);
+  expect(redo).toHaveBeenCalledTimes(1);
 
   vi.useRealTimers();
 });
@@ -190,7 +196,7 @@ const mockRect = ({
     toJSON: () => undefined,
   }) as DOMRect;
 
-test('useScrollPageCursor selects the page with the largest visible area', async () => {
+test('useScrollPageCursor keeps the current page until it is mostly gone', async () => {
   const container = document.createElement('div');
   const firstPaper = document.createElement('div');
   const secondPaper = document.createElement('div');
@@ -225,6 +231,15 @@ test('useScrollPageCursor selects the page with the largest visible area', async
 
   firstPaperRect = mockRect({ left: 0, top: -60, width: 100, height: 100 });
   secondPaperRect = mockRect({ left: 0, top: 40, width: 100, height: 100 });
+
+  act(() => {
+    container.dispatchEvent(new Event('scroll'));
+  });
+
+  expect(onChangePageCursor).not.toHaveBeenCalled();
+
+  firstPaperRect = mockRect({ left: 0, top: -85, width: 100, height: 100 });
+  secondPaperRect = mockRect({ left: 0, top: 15, width: 100, height: 100 });
 
   act(() => {
     container.dispatchEvent(new Event('scroll'));

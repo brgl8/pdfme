@@ -1,10 +1,10 @@
-import pako from 'pako';
+import { deflate } from 'pako';
 
-import { MethodNotImplementedError } from '../errors';
-import PDFDict from '../objects/PDFDict';
-import PDFName from '../objects/PDFName';
-import PDFStream from '../objects/PDFStream';
-import { Cache } from '../../utils';
+import { MethodNotImplementedError } from '../errors.js';
+import PDFDict from '../objects/PDFDict.js';
+import PDFName from '../objects/PDFName.js';
+import PDFStream from '../objects/PDFStream.js';
+import { Cache } from '../../utils/index.js';
 
 class PDFFlateStream extends PDFStream {
   protected readonly contentsCache: Cache<Uint8Array>;
@@ -21,7 +21,7 @@ class PDFFlateStream extends PDFStream {
 
   computeContents = (): Uint8Array => {
     const unencodedContents = this.getUnencodedContents();
-    return this.encode ? pako.deflate(unencodedContents) : unencodedContents;
+    return this.encode ? deflate(unencodedContents) : unencodedContents;
   };
 
   getContents(): Uint8Array {

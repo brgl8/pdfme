@@ -17,7 +17,11 @@ import { parseInlineMarkdown } from '../text/inlineMarkdown.js';
 import { measureTextLines } from '../text/measure.js';
 import { isInlineMarkdownTextSchema, resolveFontVariant } from '../text/richText.js';
 import type { RichTextRun } from '../text/types.js';
-import { substituteVariables, substituteVariablesAsInlineMarkdownLiterals } from './helper.js';
+import {
+  resolveReadOnlyMultiVariableText,
+  substituteVariables,
+  substituteVariablesAsInlineMarkdownLiterals,
+} from './helper.js';
 import { countUniqueVariableNames, visitVariables } from './variables.js';
 import { getTextLineRange } from '../splitRange.js';
 
@@ -29,7 +33,7 @@ export const uiRender = async (arg: UIRenderProps<MultiVariableTextSchema>) => {
   const renderResolvedValue = schema.readOnly === true && mode !== 'designer';
 
   const renderValue = renderResolvedValue
-    ? value
+    ? resolveReadOnlyMultiVariableText(schema, value)
     : isInlineMarkdownTextSchema(schema)
       ? substituteVariablesAsInlineMarkdownLiterals(text, value)
       : substituteVariables(text, value);
@@ -56,14 +60,18 @@ export const uiRender = async (arg: UIRenderProps<MultiVariableTextSchema>) => {
     ...rest,
   });
 
-  const textBlock = rootElement.querySelector('#text-' + String(schema.id)) as HTMLDivElement;
+  const textBlock = rootElement.querySelector(
+    '#text-' + String(schema.id),
+  ) as HTMLDivElement | null;
   if (!textBlock) {
-    throw new Error('Text block not found. Ensure the text block has an id of "text-" + schema.id');
+    // Static overlays and interrupted rerenders can drop #text-{id}. Skip instead of
+    // throwing so Designer/Viewer/Form stay usable; designer keyup attaches next render.
+    return;
   }
 
   if (mode === 'designer') {
     textBlock.addEventListener('keyup', (event: KeyboardEvent) => {
-      text = textBlock.textContent || '';
+      text = textBlock.innerText || '';
       if (keyPressShouldBeChecked(event)) {
         const newNumVariables = countUniqueVariableNames(text);
         if (numVariables !== newNumVariables) {

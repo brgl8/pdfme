@@ -1,5 +1,5 @@
 import type * as CSS from 'csstype';
-import { cmyk, degrees, degreesToRadians, rgb, Color } from '@pdfme/pdf-lib';
+import { cmyk, degrees, degreesToRadians, rgb, type Color, type RGB } from '@pdfme/pdf-lib';
 import { Schema, mm2pt, Mode, isHexValid, ColorType } from '@pdfme/common';
 import { IconNode } from 'lucide';
 import { getDynamicHeightsForTable as _getDynamicHeightsForTable } from './tables/dynamicTemplate.js';
@@ -81,7 +81,35 @@ export const addAlphaToHex = (hex: string, alphaPercentage: number) => {
 export const isEditable = (mode: Mode, schema: Schema) =>
   mode === 'designer' || (mode === 'form' && schema.readOnly !== true);
 
+// Split a '#RGBA'/'#RRGGBBAA' hex into its opaque color and alpha channel, since
+// pdf-lib colors carry no alpha; alpha must be applied as draw opacity instead.
+// Colors without an alpha channel are passed through with alpha 1. Invalid hex is
+// also passed through untouched (never split) so that downstream color validation
+// still rejects the original string instead of a salvaged color plus a NaN alpha.
+export const splitHexAlpha = (hexColor: string): { color: string; alpha: number } => {
+  if (!hexColor.startsWith('#')) return { color: hexColor, alpha: 1 };
+  const hex = hexColor.slice(1);
+  if (!/^(?:[0-9a-f]{4}|[0-9a-f]{8})$/i.test(hex)) return { color: hexColor, alpha: 1 };
+  const rgbLength = hex.length === 4 ? 3 : 6;
+  const alphaHex = hex.slice(rgbLength);
+  return {
+    color: `#${hex.slice(0, rgbLength)}`,
+    alpha: parseInt(alphaHex.length === 1 ? alphaHex.repeat(2) : alphaHex, 16) / 255,
+  };
+};
+
+// Multiply a hex color's alpha channel into a draw opacity. An alpha of 1 returns
+// the opacity untouched (including undefined) so that PDFs rendered from colors
+// without an alpha channel stay byte-identical to previous releases: pdf-lib only
+// embeds an ExtGState when the opacity is defined.
+export const applyAlphaToOpacity = (
+  opacity: number | undefined,
+  alpha: number,
+): number | undefined => (alpha === 1 ? opacity : (opacity ?? 1) * alpha);
+
 const hex2rgb = (hex: string) => {
+  // Drop any alpha channel; pdf-lib colors cannot represent it.
+  hex = splitHexAlpha(hex).color;
   if (hex.slice(0, 1) === '#') hex = hex.slice(1);
   if (hex.length === 3)
     hex =
@@ -93,6 +121,15 @@ const hex2rgb = (hex: string) => {
       hex.slice(2, 3);
 
   return [hex.slice(0, 2), hex.slice(2, 4), hex.slice(4, 6)].map((str) => parseInt(str, 16));
+};
+
+export const rgbColorToCmykColor = ({ red, green, blue }: RGB) => {
+  const key = 1 - Math.max(red, green, blue);
+  const cyan = key === 1 ? 0 : (1 - red - key) / (1 - key);
+  const magenta = key === 1 ? 0 : (1 - green - key) / (1 - key);
+  const yellow = key === 1 ? 0 : (1 - blue - key) / (1 - key);
+
+  return cmyk(cyan, magenta, yellow, key);
 };
 
 export const hex2RgbColor = (hexString: string | undefined) => {
@@ -119,31 +156,10 @@ const hex2CmykColor = (hexString: string | undefined) => {
       throw new Error(`Invalid hex color value ${hexString}`);
     }
 
-    // Remove the # if it's present
-    hexString = hexString.replace('#', '');
+    // Alpha is not flattened here; callers apply it as draw opacity via splitHexAlpha.
+    const [r, g, b] = hex2rgb(hexString).map((value) => value / 255);
 
-    // Extract the hexadecimal color code and the opacity
-    const hexColor = hexString.substring(0, 6);
-    const opacityColor = hexString.substring(6, 8);
-    const opacity = opacityColor ? parseInt(opacityColor, 16) / 255 : 1;
-
-    // Convert the hex values to decimal
-    let r = parseInt(hexColor.substring(0, 2), 16) / 255;
-    let g = parseInt(hexColor.substring(2, 4), 16) / 255;
-    let b = parseInt(hexColor.substring(4, 6), 16) / 255;
-
-    // Apply the opacity
-    r = r * opacity + (1 - opacity);
-    g = g * opacity + (1 - opacity);
-    b = b * opacity + (1 - opacity);
-
-    // Calculate the CMYK values
-    const k = 1 - Math.max(r, g, b);
-    const c = k === 1 ? 0 : (1 - r - k) / (1 - k);
-    const m = k === 1 ? 0 : (1 - g - k) / (1 - k);
-    const y = k === 1 ? 0 : (1 - b - k) / (1 - k);
-
-    return cmyk(c, m, y, k);
+    return rgbColorToCmykColor(rgb(r, g, b));
   }
 
   return undefined;

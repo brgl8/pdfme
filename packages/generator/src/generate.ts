@@ -1,11 +1,19 @@
 import * as pdfLib from '@pdfme/pdf-lib';
-import type { GenerateProps, GeneratorOptions, Schema, PDFRenderProps, Template } from '@pdfme/common';
+import type {
+  GenerateProps,
+  GeneratorOptions,
+  Schema,
+  PDFRenderProps,
+  Template,
+  PdfBytes,
+} from '@pdfme/common';
 import {
   checkGenerateProps,
   applyInternalLinkAnnotations,
   getDynamicTemplate,
+  getReadOnlyTableValue,
   isBlankPdf,
-  replacePlaceholders,
+  resolveReadOnlyContent,
   pt2mm,
   cloneDeep,
   mm2pt,
@@ -21,11 +29,6 @@ import {
   validateRequiredFields,
 } from './helper.js';
 
-type SchemaRenderInfo = {
-  schemaNames: string[];
-  schemaPages: Map<string, Schema>[];
-};
-
 const hasDynamicLayoutSchema = (schemas: Schema[][]) => {
   for (let i = 0; i < schemas.length; i += 1) {
     const schemaPage = schemas[i];
@@ -36,31 +39,6 @@ const hasDynamicLayoutSchema = (schemas: Schema[][]) => {
     }
   }
   return false;
-};
-
-const getSchemaRenderInfo = (schemas: Schema[][]): SchemaRenderInfo => {
-  const schemaNameSet = new Set<string>();
-  const schemaPages: Map<string, Schema>[] = [];
-
-  for (let i = 0; i < schemas.length; i += 1) {
-    const schemaPage = schemas[i];
-    const schemaMap = new Map<string, Schema>();
-
-    for (let j = 0; j < schemaPage.length; j += 1) {
-      const schema = schemaPage[j];
-      if (!schema.name) {
-        continue;
-      }
-      schemaNameSet.add(schema.name);
-      if (!schemaMap.has(schema.name)) {
-        schemaMap.set(schema.name, schema);
-      }
-    }
-
-    schemaPages.push(schemaMap);
-  }
-
-  return { schemaNames: Array.from(schemaNameSet), schemaPages };
 };
 
 const getAdjustedSchema = (
@@ -103,7 +81,7 @@ const getRenderOptions = (options: GeneratorOptions): GeneratorOptions => {
   return renderOptions;
 };
 
-const generate = async (props: GenerateProps): Promise<Uint8Array<ArrayBuffer>> => {
+const generate = async (props: GenerateProps): Promise<PdfBytes> => {
   checkGenerateProps(props);
   const { inputs, template: _template, options = {}, plugins: userPlugins = {} } = props;
   const renderOptions = getRenderOptions(options);
@@ -133,9 +111,6 @@ const generate = async (props: GenerateProps): Promise<Uint8Array<ArrayBuffer>> 
         template,
         pdfDoc,
       });
-  const cachedRenderInfo = shouldApplyDynamicTemplate
-    ? undefined
-    : getSchemaRenderInfo(template.schemas);
 
   for (let i = 0; i < inputs.length; i += 1) {
     const input = inputs[i];
@@ -159,9 +134,6 @@ const generate = async (props: GenerateProps): Promise<Uint8Array<ArrayBuffer>> 
       }));
 
     const schemas = dynamicTemplate.schemas;
-    const { schemaNames, schemaPages } = shouldApplyDynamicTemplate
-      ? getSchemaRenderInfo(schemas)
-      : (cachedRenderInfo as SchemaRenderInfo);
 
     for (let j = 0; j < basePages.length; j += 1) {
       const basePage = basePages[j];
@@ -182,13 +154,16 @@ const generate = async (props: GenerateProps): Promise<Uint8Array<ArrayBuffer>> 
           if (!render) {
             continue;
           }
-          const value = staticSchema.readOnly
-            ? replacePlaceholders({
-                content: staticSchema.content || '',
-                variables,
-                schemas,
-              })
-            : staticSchema.content || '';
+          const value =
+            staticSchema.readOnly && staticSchema.type === 'table'
+              ? getReadOnlyTableValue(staticSchema, input)
+              : staticSchema.readOnly
+                ? resolveReadOnlyContent({
+                    schema: staticSchema,
+                    variables,
+                    schemas,
+                  })
+                : staticSchema.content || '';
 
           const adjustedStaticSchema = getAdjustedSchema(
             staticSchema,
@@ -211,15 +186,10 @@ const generate = async (props: GenerateProps): Promise<Uint8Array<ArrayBuffer>> 
         }
       }
 
-      const schemaPage = schemaPages[j];
-      if (!schemaPage) {
-        continue;
-      }
-
-      for (let l = 0; l < schemaNames.length; l += 1) {
-        const name = schemaNames[l];
-        const schema = schemaPage.get(name);
-        if (!schema) {
+      const schemaPage = schemas[j] || [];
+      for (let l = 0; l < schemaPage.length; l += 1) {
+        const schema = schemaPage[l];
+        if (!schema.name) {
           continue;
         }
 
@@ -227,13 +197,16 @@ const generate = async (props: GenerateProps): Promise<Uint8Array<ArrayBuffer>> 
         if (!render) {
           continue;
         }
-        const value: string = schema.readOnly
-          ? replacePlaceholders({
-              content: schema.content || '',
-              variables,
-              schemas,
-            })
-          : ((input[name] || '') as string);
+        const value: string =
+          schema.readOnly && schema.type === 'table'
+            ? getReadOnlyTableValue(schema, input)
+            : schema.readOnly
+              ? resolveReadOnlyContent({
+                  schema,
+                  variables,
+                  schemas,
+                })
+              : ((input[schema.name] || '') as string);
 
         const adjustedSchema = getAdjustedSchema(schema, boundingBoxLeft, boundingBoxBottom);
         registerSchemaAnchor(_cache, adjustedSchema, page);

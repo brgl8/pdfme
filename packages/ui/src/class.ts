@@ -1,6 +1,7 @@
 import { ReactNode } from 'react';
 import { createRoot, Root } from 'react-dom/client';
 import { DESTROYED_ERR_MSG, DEFAULT_LANG } from './constants.js';
+import { measureUiContainerSize } from './containerSize.js';
 import { debounce } from './helper.js';
 import {
   cloneDeep,
@@ -44,17 +45,10 @@ export abstract class BaseUIClass {
       return;
     }
 
-    const rect = this.domContainer.getBoundingClientRect();
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-
-    const visibleWidth = Math.max(0, Math.min(rect.right, vw) - Math.max(rect.left, 0));
-    const visibleHeight = Math.max(0, Math.min(rect.bottom, vh) - Math.max(rect.top, 0));
-
-    this.size = {
-      height: visibleHeight,
-      width: visibleWidth,
-    };
+    this.size = measureUiContainerSize(this.domContainer, {
+      height: window.innerHeight,
+      width: window.innerWidth,
+    });
 
     this.render();
   }, 100);
@@ -67,12 +61,12 @@ export abstract class BaseUIClass {
     const { domContainer, template, options = {}, plugins = {} } = props;
     this.domContainer = domContainer;
     this.template = cloneDeep(template);
-    this.options = options;
+    this.options = Object.assign({}, options);
     const container = this.domContainer;
-    this.size = {
-      height: container.clientHeight || window.innerHeight,
-      width: container.clientWidth || window.innerWidth,
-    };
+    this.size = measureUiContainerSize(container, {
+      height: window.innerHeight,
+      width: window.innerWidth,
+    });
     this.resizeObserver.observe(container);
 
     const { lang, font } = options;
@@ -128,7 +122,7 @@ export abstract class BaseUIClass {
     if (font) {
       this.font = font;
     }
-    this.options = Object.assign(this.options, options);
+    this.options = Object.assign({}, this.options, options);
     this.render();
   }
 

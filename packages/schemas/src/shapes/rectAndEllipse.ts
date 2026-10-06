@@ -1,7 +1,13 @@
 import { Plugin, Schema, mm2pt } from '@pdfme/common';
 import { HEX_COLOR_PATTERN } from '../constants.js';
-import { hex2PrintingColor, convertForPdfLayoutProps, createSvgStr } from '../utils.js';
-import { toRadians } from '@pdfme/pdf-lib';
+import {
+  hex2PrintingColor,
+  convertForPdfLayoutProps,
+  createSvgStr,
+  rotatePoint,
+  splitHexAlpha,
+  applyAlphaToOpacity,
+} from '../utils.js';
 import { Circle, Square } from 'lucide';
 
 export interface ShapeSchema extends Schema {
@@ -43,13 +49,15 @@ const shape: Plugin<ShapeSchema> = {
     } = convertForPdfLayoutProps({ ...cArg, applyRotateTranslate: false });
     const borderWidth = schema.borderWidth ? mm2pt(schema.borderWidth) : 0;
 
+    const { color: fillHex, alpha: fillAlpha } = splitHexAlpha(schema.color ?? '');
+    const { color: borderHex, alpha: borderAlpha } = splitHexAlpha(schema.borderColor ?? '');
     const drawOptions = {
       rotate,
       borderWidth,
-      borderColor: hex2PrintingColor(schema.borderColor, colorType),
-      color: hex2PrintingColor(schema.color, colorType),
-      opacity,
-      borderOpacity: opacity,
+      borderColor: hex2PrintingColor(borderHex, colorType),
+      color: hex2PrintingColor(fillHex, colorType),
+      opacity: applyAlphaToOpacity(opacity, fillAlpha),
+      borderOpacity: applyAlphaToOpacity(opacity, borderAlpha),
     };
     if (schema.type === 'ellipse') {
       page.drawEllipse({
@@ -61,16 +69,18 @@ const shape: Plugin<ShapeSchema> = {
       });
     } else if (schema.type === 'rectangle') {
       const radius = schema.radius ?? 0;
+      // position is the (already center-rotated) bottom-left anchor of the full box.
+      // Inset the stroke path by borderWidth/2 in the box's local rotated frame so the
+      // centered PDF stroke matches the UI's inside (border-box) border.
+      const inset = rotatePoint(
+        { x: position.x + borderWidth / 2, y: position.y + borderWidth / 2 },
+        position,
+        rotate.angle,
+      );
 
       page.drawRectangle({
-        x:
-          position.x +
-          borderWidth * ((1 - Math.sin(toRadians(rotate))) / 2) +
-          Math.tan(toRadians(rotate)) * Math.PI ** 2,
-        y:
-          position.y +
-          borderWidth * ((1 + Math.sin(toRadians(rotate))) / 2) +
-          Math.tan(toRadians(rotate)) * Math.PI ** 2,
+        x: inset.x,
+        y: inset.y,
         width: width - borderWidth,
         height: height - borderWidth,
         ...(radius ? { radius: mm2pt(radius) } : {}),
@@ -91,9 +101,6 @@ const shape: Plugin<ShapeSchema> = {
         title: i18n('schemas.borderColor'),
         type: 'string',
         widget: 'color',
-        props: {
-          disabledAlpha: true,
-        },
         rules: [{ pattern: HEX_COLOR_PATTERN, message: i18n('validation.hexColor') }],
         span: 12,
       },
@@ -101,9 +108,6 @@ const shape: Plugin<ShapeSchema> = {
         title: i18n('schemas.color'),
         type: 'string',
         widget: 'color',
-        props: {
-          disabledAlpha: true,
-        },
         rules: [{ pattern: HEX_COLOR_PATTERN, message: i18n('validation.hexColor') }],
       },
       radius: {

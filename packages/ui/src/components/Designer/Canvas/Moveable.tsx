@@ -11,6 +11,7 @@ import { theme } from 'antd';
 
 type Props = {
   target: HTMLElement[];
+  controlScale: number;
   bounds: { left: number; top: number; bottom: number; right: number };
   horizontalGuidelines: number[];
   verticalGuidelines: number[];
@@ -53,6 +54,7 @@ const Moveable = (props: Props, ref: Ref<MoveableComponent>) => {
     <MoveableView
       className={uniqueClassName}
       rootContainer={document ? document.body : undefined}
+      zoom={props.controlScale}
       snappable
       draggable
       rotatable={props.rotatable}

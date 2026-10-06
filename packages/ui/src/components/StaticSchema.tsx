@@ -1,7 +1,12 @@
-import React from 'react';
-import { isBlankPdf, replacePlaceholders, Template } from '@pdfme/common';
+import React, { useState } from 'react';
+import {
+  getReadOnlyTableValue,
+  isBlankPdf,
+  resolveReadOnlyContent,
+  Template,
+} from '@pdfme/common';
 import Renderer from './Renderer.js';
-import { uuid } from '../helper.js';
+import { stabilizeSchemaIds } from '../helper.js';
 
 const StaticSchema = (props: {
   template: Template;
@@ -17,22 +22,26 @@ const StaticSchema = (props: {
     totalPages,
     currentPage,
   } = props;
+  const [staticSchemaIds] = useState(() => new Map<string, string>());
   if (!isBlankPdf(basePdf) || !basePdf.staticSchema) return null;
+  const schemasForUI = stabilizeSchemaIds(basePdf.staticSchema, staticSchemaIds);
   return (
     <>
-      {basePdf.staticSchema.map((schema) => (
+      {schemasForUI.map((schema) => (
         <Renderer
           key={schema.name}
-          schema={{ ...schema, id: uuid() }}
+          schema={schema}
           basePdf={basePdf}
           value={
-            schema.readOnly
-              ? replacePlaceholders({
-                  content: schema.content || '',
-                  variables: { ...input, totalPages, currentPage },
-                  schemas,
-                })
-              : schema.content || ''
+            schema.readOnly && schema.type === 'table'
+              ? getReadOnlyTableValue(schema, input)
+              : schema.readOnly
+                ? resolveReadOnlyContent({
+                    schema,
+                    variables: { ...input, totalPages, currentPage },
+                    schemas,
+                  })
+                : schema.content || ''
           }
           onChangeHoveringSchemaId={() => {
             void 0;

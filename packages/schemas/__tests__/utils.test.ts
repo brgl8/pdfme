@@ -5,9 +5,44 @@ import {
   rotatePoint,
   hex2RgbColor,
   hex2PrintingColor,
+  splitHexAlpha,
+  applyAlphaToOpacity,
   createSvgStr,
 } from '../src/utils.js';
 import { SquareCheck, IconNode } from 'lucide';
+import { HEX_COLOR_PATTERN, OPAQUE_HEX_COLOR_PATTERN } from '../src/constants.js';
+
+describe('HEX_COLOR_PATTERN', () => {
+  const hexColorRegExp = new RegExp(HEX_COLOR_PATTERN);
+
+  it('should accept 3/4/6/8-digit hex, aligned with isHexValid', () => {
+    expect(hexColorRegExp.test('#fff')).toBe(true);
+    expect(hexColorRegExp.test('#fff8')).toBe(true);
+    expect(hexColorRegExp.test('#ffffff')).toBe(true);
+    expect(hexColorRegExp.test('#ffffff80')).toBe(true);
+    expect(hexColorRegExp.test('#FF000080')).toBe(true);
+  });
+
+  it('should reject other lengths and non-hex input', () => {
+    expect(hexColorRegExp.test('#ff')).toBe(false);
+    expect(hexColorRegExp.test('#fffff')).toBe(false);
+    expect(hexColorRegExp.test('#fffffff')).toBe(false);
+    expect(hexColorRegExp.test('#fffffffff')).toBe(false);
+    expect(hexColorRegExp.test('ffffff')).toBe(false);
+    expect(hexColorRegExp.test('#ff0000gg')).toBe(false);
+  });
+});
+
+describe('OPAQUE_HEX_COLOR_PATTERN', () => {
+  const opaqueHexColorRegExp = new RegExp(OPAQUE_HEX_COLOR_PATTERN);
+
+  it('should accept only 6-digit hex (bwip-js reads 8-digit hex as CMYK)', () => {
+    expect(opaqueHexColorRegExp.test('#ffffff')).toBe(true);
+    expect(opaqueHexColorRegExp.test('#fff')).toBe(false);
+    expect(opaqueHexColorRegExp.test('#fff8')).toBe(false);
+    expect(opaqueHexColorRegExp.test('#ffffff80')).toBe(false);
+  });
+});
 
 describe('hex2RgbColor', () => {
   it('should convert hex to rgb', () => {
@@ -36,6 +71,69 @@ describe('hex2RgbColor', () => {
   it('should throw an error if hex is invalid', () => {
     const hex = '#fffee';
     expect(() => hex2RgbColor(hex)).toThrow('Invalid hex color value #ff');
+  });
+
+  it('should ignore the alpha channel of an 8-digit hex (#1634)', () => {
+    const rgbValue = hex2RgbColor('#ff000080');
+    expect(rgbValue).toEqual({ red: 1, green: 0, blue: 0, type: 'RGB' });
+  });
+
+  it('should convert a 4-digit hex without producing NaN (#1635)', () => {
+    const rgbValue = hex2RgbColor('#0f08');
+    expect(rgbValue).toEqual({ red: 0, green: 1, blue: 0, type: 'RGB' });
+  });
+});
+
+describe('splitHexAlpha', () => {
+  it('should split an 8-digit hex into color and alpha', () => {
+    expect(splitHexAlpha('#ff000080')).toEqual({ color: '#ff0000', alpha: 128 / 255 });
+  });
+
+  it('should split a 4-digit hex and expand the single-digit alpha', () => {
+    expect(splitHexAlpha('#0f08')).toEqual({ color: '#0f0', alpha: 136 / 255 });
+  });
+
+  it('should pass through 6-digit and 3-digit hex with alpha 1', () => {
+    expect(splitHexAlpha('#ff0000')).toEqual({ color: '#ff0000', alpha: 1 });
+    expect(splitHexAlpha('#f00')).toEqual({ color: '#f00', alpha: 1 });
+  });
+
+  it('should pass through non-hash strings unchanged', () => {
+    expect(splitHexAlpha('')).toEqual({ color: '', alpha: 1 });
+    expect(splitHexAlpha('ff000080')).toEqual({ color: 'ff000080', alpha: 1 });
+  });
+
+  it('should split uppercase hex', () => {
+    expect(splitHexAlpha('#FF000080')).toEqual({ color: '#FF0000', alpha: 128 / 255 });
+    expect(splitHexAlpha('#0F08')).toEqual({ color: '#0F0', alpha: 136 / 255 });
+  });
+
+  it('should pass through invalid 4/8-length hex unchanged instead of salvaging a color', () => {
+    // Splitting '#ff0000gg' would yield the valid color '#ff0000' plus a NaN alpha,
+    // silently drawing with a NaN opacity where downstream validation used to throw.
+    expect(splitHexAlpha('#ff0000gg')).toEqual({ color: '#ff0000gg', alpha: 1 });
+    expect(splitHexAlpha('#0f0g')).toEqual({ color: '#0f0g', alpha: 1 });
+  });
+
+  it('should report fully transparent and fully opaque alpha values', () => {
+    expect(splitHexAlpha('#ff000000')).toEqual({ color: '#ff0000', alpha: 0 });
+    expect(splitHexAlpha('#ff0000ff')).toEqual({ color: '#ff0000', alpha: 1 });
+  });
+});
+
+describe('applyAlphaToOpacity', () => {
+  it('should multiply alpha into a defined opacity', () => {
+    expect(applyAlphaToOpacity(0.5, 0.5)).toBeCloseTo(0.25);
+    expect(applyAlphaToOpacity(1, 128 / 255)).toBeCloseTo(128 / 255);
+  });
+
+  it('should treat an undefined opacity as 1 when alpha is applied', () => {
+    expect(applyAlphaToOpacity(undefined, 0.5)).toBeCloseTo(0.5);
+  });
+
+  it('should leave the opacity untouched when alpha is 1, preserving undefined', () => {
+    expect(applyAlphaToOpacity(undefined, 1)).toBeUndefined();
+    expect(applyAlphaToOpacity(0.7, 1)).toBe(0.7);
   });
 });
 
@@ -74,6 +172,13 @@ describe('hex2PrintingColor (CMYK)', () => {
   it('should convert mixed and gray colors', () => {
     expectCmyk('#ff8000', 0, 0.498039, 1, 0);
     expectCmyk('#808080', 0, 0, 0, 0.498039);
+  });
+
+  it('should not flatten the alpha channel onto white (#1634)', () => {
+    // Alpha is applied as draw opacity by the renderers, so the CMYK color itself
+    // must be the fully saturated base color, not a whitened blend.
+    expectCmyk('#ff000080', 0, 1, 1, 0);
+    expectCmyk('#0f08', 1, 0, 1, 0);
   });
 });
 

@@ -16,14 +16,10 @@ import { getFontDescentInPt, heightOfFontAtSize, widthOfTextAtSize } from './hel
 import { addUriLinkAnnotation, type LinkAnnotationRect } from './linkAnnotation.js';
 import { parseInlineMarkdown } from './inlineMarkdown.js';
 import { applyTextLineRange } from './measure.js';
-import {
-  countRichTextLineGraphemes,
-  layoutRichTextLines,
-  resolveRichTextRuns,
-  type RichTextLineRun,
-} from './richText.js';
+import { layoutRichTextLines, resolveRichTextRuns, type RichTextLineRun } from './richText.js';
+import { getLineAlignment } from './wrap.js';
 import type { TextSchema } from './types.js';
-import { hex2PrintingColor, rotatePoint } from '../utils.js';
+import { hex2PrintingColor, rotatePoint, applyAlphaToOpacity } from '../utils.js';
 import { getTextLineRange } from '../splitRange.js';
 
 type TextColor = ReturnType<typeof hex2PrintingColor>;
@@ -153,6 +149,7 @@ const drawRun = (arg: {
   lineHeight: number;
   color: TextColor;
   opacity: number | undefined;
+  textOpacity: number | undefined;
   colorType: ColorType;
   characterSpacing: number;
   strikethrough: boolean;
@@ -171,6 +168,7 @@ const drawRun = (arg: {
     lineHeight,
     color,
     opacity,
+    textOpacity,
     colorType,
     characterSpacing,
     strikethrough,
@@ -210,7 +208,7 @@ const drawRun = (arg: {
       pivotPoint,
       fontSize,
       color,
-      opacity,
+      opacity: textOpacity,
     });
   }
 
@@ -224,7 +222,7 @@ const drawRun = (arg: {
       pivotPoint,
       fontSize,
       color,
-      opacity,
+      opacity: textOpacity,
     });
   }
 
@@ -239,7 +237,7 @@ const drawRun = (arg: {
       color,
       lineHeight: lineHeight * fontSize,
       font: pdfFont,
-      opacity,
+      opacity: textOpacity,
       ...(run.syntheticItalic ? { ySkew: pdfLib.degrees(SYNTHETIC_ITALIC_SKEW_DEGREES) } : {}),
     });
   };
@@ -277,6 +275,7 @@ export const renderInlineMarkdownText = async (arg: {
   pivotPoint: { x: number; y: number };
   rotate: Rotation;
   opacity: number | undefined;
+  colorAlpha: number;
 }) => {
   const {
     value,
@@ -302,7 +301,10 @@ export const renderInlineMarkdownText = async (arg: {
     pivotPoint,
     rotate,
     opacity,
+    colorAlpha,
   } = arg;
+  // The font color's alpha applies to text and its decorations, not to the code background.
+  const textOpacity = applyAlphaToOpacity(opacity, colorAlpha);
   const richTextRuns = parseInlineMarkdown(value);
   const resolvedRuns = await resolveRichTextRuns({ runs: richTextRuns, schema, font, _cache });
   const allLines = layoutRichTextLines({
@@ -313,7 +315,6 @@ export const renderInlineMarkdownText = async (arg: {
   });
   const lineRange = getTextLineRange(schema);
   const lines = applyTextLineRange(allLines, lineRange);
-  const lineRangeStart = lineRange?.start ?? 0;
   const pdfFontObj = await embedFontsForRuns(
     lines.flatMap((line) => line.runs),
     embedPdfFont,
@@ -340,25 +341,18 @@ export const renderInlineMarkdownText = async (arg: {
   lines.forEach((line, rowIndex) => {
     if (line.runs.length === 0) return;
 
-    let textWidth = line.width;
-    let spacing = characterSpacing;
-    const shouldJustify =
-      alignment === 'justify' && !line.hardBreak && lineRangeStart + rowIndex < allLines.length - 1;
-
-    if (shouldJustify) {
-      const graphemeCount = countRichTextLineGraphemes(line);
-      if (graphemeCount > 0) {
-        spacing += (width - textWidth) / graphemeCount;
-        textWidth = width;
-      }
-    }
-
-    let xLine = x;
-    if (alignment === 'center') {
-      xLine += (width - textWidth) / 2;
-    } else if (alignment === 'right') {
-      xLine += width - textWidth;
-    }
+    const alignmentMetrics = getLineAlignment(
+      {
+        text: line.runs.map((run) => run.text).join(''),
+        width: line.width,
+        hardBreak: line.hardBreak,
+      },
+      width,
+      alignment,
+    );
+    const textWidth = alignmentMetrics.usedWidth;
+    const spacing = characterSpacing + alignmentMetrics.extraLetterSpacing;
+    const xLine = x + alignmentMetrics.x;
 
     const yLine = y + height - yOffset - lineHeight * fontSize * rowIndex;
     page.pushOperators(pdfLib.setCharacterSpacing(spacing));
@@ -377,7 +371,7 @@ export const renderInlineMarkdownText = async (arg: {
           pivotPoint,
           fontSize,
           color,
-          opacity,
+          opacity: textOpacity,
         });
       }
       if (schema.underline) {
@@ -390,7 +384,7 @@ export const renderInlineMarkdownText = async (arg: {
           pivotPoint,
           fontSize,
           color,
-          opacity,
+          opacity: textOpacity,
         });
       }
     }
@@ -411,6 +405,7 @@ export const renderInlineMarkdownText = async (arg: {
         lineHeight,
         color,
         opacity,
+        textOpacity,
         colorType,
         characterSpacing: spacing,
         strikethrough: Boolean(run.strikethrough),

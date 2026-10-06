@@ -47,6 +47,7 @@ import type {
   DynamicLayoutPatchArgs,
   DynamicLayoutResult,
   GetDynamicLayout,
+  PdfBytes,
 } from './types.js';
 import type { PdfLinkAnnotationRect } from './helper.js';
 import type { PageOrientation, PageSize, PageSizePreset } from './pageSize.js';
@@ -82,9 +83,9 @@ import {
   applyInternalLinkAnnotations,
 } from './helper.js';
 import { PAGE_SIZE_PRESETS, detectPaperSize, resolvePageSize } from './pageSize.js';
-import { getDynamicTemplate } from './dynamicTemplate.js';
+import { getDynamicTemplate, getReadOnlyTableValue, getSchemaValue } from './dynamicTemplate.js';
 import { createDynamicLayoutSplitRange, getDynamicLayoutSplitRange } from './splitRange.js';
-import { replacePlaceholders } from './expression.js';
+import { replacePlaceholders, resolveReadOnlyContent } from './expression.js';
 import { pluginRegistry } from './pluginRegistry.js';
 
 export {
@@ -110,7 +111,10 @@ export {
   getInputFromTemplate,
   isBlankPdf,
   getDynamicTemplate,
+  getReadOnlyTableValue,
+  getSchemaValue,
   replacePlaceholders,
+  resolveReadOnlyContent,
   checkFont,
   checkInputs,
   checkUIOptions,
@@ -178,4 +182,5 @@ export type {
   PageOrientation,
   PageSize,
   PageSizePreset,
+  PdfBytes,
 };

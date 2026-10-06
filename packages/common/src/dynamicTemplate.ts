@@ -40,8 +40,23 @@ interface LayoutItem {
 const getContentHeight = (basePdf: BlankPdf): number =>
   basePdf.height - basePdf.padding[0] - basePdf.padding[2];
 
+/**
+ * Resolve a readOnly table body.
+ * Uses input[schema.name] when present (array or JSON string) and never runs
+ * replacePlaceholders. Falls back to schema.content (Designer sample).
+ */
+export const getReadOnlyTableValue = (schema: Schema, input?: Record<string, unknown>): string => {
+  if (input && Object.prototype.hasOwnProperty.call(input, schema.name)) {
+    const value = input[schema.name];
+    if (value !== undefined && value !== null) {
+      return typeof value === 'string' ? value : JSON.stringify(value);
+    }
+  }
+  return schema.content || '';
+};
+
 /** Get the input value for a schema */
-const getSchemaValue = (
+export const getSchemaValue = (
   schema: Schema,
   input: Record<string, string>,
   schemas: Schema[][],
@@ -50,7 +65,13 @@ const getSchemaValue = (
     return input?.[schema.name] || '';
   }
 
-  if (schema.type !== 'text' && schema.type !== 'multiVariableText') {
+  if (schema.type === 'table') {
+    return getReadOnlyTableValue(schema, input);
+  }
+
+  // Expressions are only for text. MVT `content` is variable JSON; other
+  // types keep their raw content (see #1299 / #1345).
+  if (schema.type !== 'text') {
     return schema.content || '';
   }
 
@@ -110,7 +131,7 @@ function placeUnitsOnPages(
 ): number {
   const dynamicHeights = dynamicLayout.heights;
   let currentUnitIndex = 0;
-  let currentPageIndex = Math.floor(startGlobalY / contentHeight);
+  let currentPageIndex = Math.max(0, Math.floor(startGlobalY / contentHeight));
   let currentYInPage = startGlobalY % contentHeight;
 
   if (currentYInPage < 0) currentYInPage = 0;
@@ -153,7 +174,8 @@ function placeUnitsOnPages(
 
     // Some schemas, such as tables with headers, should not leave the first unit
     // alone on a page without any following data units.
-    // BUT: if already at page top, don't move (prevents infinite loop when data row is too large)
+    // BUT: if already at page top, don't move (prevents infinite loop when data row is too large).
+    // An empty page has nothing to protect, so restart at its top instead of inserting a blank page.
     const isAtPageTop = currentYInPage <= EPSILON;
     if (
       dynamicLayout.avoidFirstUnitOnly &&
@@ -164,8 +186,13 @@ function placeUnitsOnPages(
       !isAtPageTop
     ) {
       currentUnitIndex = 0;
-      currentPageIndex++;
-      currentYInPage = 0;
+      if (pages[currentPageIndex].length === 0) {
+        // Only avoidFirstUnitOnly layouts (tables) reach this restart.
+        currentYInPage = 0;
+      } else {
+        currentPageIndex++;
+        currentYInPage = 0;
+      }
       continue;
     }
 

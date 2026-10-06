@@ -3,8 +3,10 @@ import { PNG } from 'pngjs';
 import {
   validateBarcodeInput,
   createBarCode,
+  createBarCodeSvg,
   barCodeType2Bcid,
   mapHexColorForBwipJsLib,
+  resolveBarcodeRenderRuntime,
 } from '../src/barcodes/helper.js';
 
 describe('validateBarcodeInput test', () => {
@@ -345,6 +347,83 @@ describe('createBarCode', () => {
   });
 });
 
+describe('createBarCodeSvg', () => {
+  const validInputs = {
+    qrcode: 'https://pdfme.com/',
+    japanpost: '10000131-3-2-B503',
+    ean13: '1111111111116',
+    ean8: '11111115',
+    code39: 'ABC-123',
+    code128: 'ABC-123',
+    nw7: 'A12345B',
+    itf14: '12345678901231',
+    upca: '123456789012',
+    upce: '01234565',
+    gs1datamatrix: '(01)12345678901231',
+    pdf417: 'Test PDF417 barcode generation',
+  } as const;
+
+  test.each(Object.entries(validInputs))('%s emits vector SVG without images', (type, input) => {
+    const svg = createBarCodeSvg({
+      type: type as keyof typeof validInputs,
+      input,
+      width: 30,
+      height: 20,
+      backgroundColor: '#ffffff',
+      barColor: '#000000',
+      textColor: '#000000',
+    });
+
+    expect(svg).toContain('<svg');
+    expect(svg).not.toMatch(/<image\b/i);
+  });
+
+  test('adds a default fill for SVG paths without an explicit fill', () => {
+    const svg = createBarCodeSvg({
+      type: 'qrcode',
+      input: 'https://pdfme.com/default-fill',
+      width: 30,
+      height: 30,
+      backgroundColor: '',
+      barColor: '',
+    });
+
+    expect(svg).toMatch(/<svg\b[^>]*fill="#000000"/);
+  });
+
+  test('drops the alpha channel of an 8-digit barColor so bwip-js does not misread it as CMYK', () => {
+    const svg = createBarCodeSvg({
+      type: 'qrcode',
+      input: 'https://pdfme.com/alpha-fill',
+      width: 30,
+      height: 30,
+      backgroundColor: '',
+      barColor: '#ff000080',
+    });
+
+    // The injected default fill must be the opaque color (no alpha to inherit in PDF),
+    // and bwip-js must have received 'ff0000', not the CMYK-misread 'ff000080' (#007f7f).
+    expect(svg).toMatch(/<svg\b[^>]*fill="#ff0000"/);
+    expect(svg).toContain('#ff0000');
+    expect(svg).not.toContain('ff000080');
+    expect(svg).not.toContain('#007f7f');
+  });
+
+  test('renders a 4-digit barColor without bwip-js throwing', () => {
+    const svg = createBarCodeSvg({
+      type: 'qrcode',
+      input: 'https://pdfme.com/short-alpha',
+      width: 30,
+      height: 30,
+      backgroundColor: '',
+      barColor: '#f008',
+    });
+
+    expect(svg).toContain('<svg');
+    expect(svg).not.toContain('f008');
+  });
+});
+
 describe('barCodeType2Bcid test', () => {
   test('it maps the nw7 barcode type', () => {
     expect(barCodeType2Bcid('nw7')).toEqual('rationalizedCodabar');
@@ -364,6 +443,57 @@ describe('barCodeType2Bcid test', () => {
   });
 });
 
+describe('resolveBarcodeRenderRuntime', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  test('uses node-buffer in Node when neither document nor OffscreenCanvas exists', () => {
+    expect(typeof globalThis.document).toBe('undefined');
+    expect(typeof (globalThis as { OffscreenCanvas?: unknown }).OffscreenCanvas).toBe('undefined');
+    expect(resolveBarcodeRenderRuntime()).toBe('node-buffer');
+  });
+
+  test('falls back to node-buffer when OffscreenCanvas exists but toCanvas is missing', async () => {
+    vi.stubGlobal(
+      'OffscreenCanvas',
+      class {
+        constructor(
+          public width: number,
+          public height: number,
+        ) {}
+      },
+    );
+    expect(resolveBarcodeRenderRuntime()).toBe('node-buffer');
+
+    const buffer = await createBarCode({
+      type: 'qrcode',
+      input: 'https://pdfme.com/node-export',
+      width: 10,
+      height: 10,
+      backgroundColor: '00000000',
+    });
+    const png = PNG.sync.read(buffer);
+    const qr = jsQR(new Uint8ClampedArray(png.data), png.width, png.height) as QRCode;
+    expect(qr).not.toBeNull();
+    expect(Buffer.from(qr.binaryData).toString('utf8')).toEqual('https://pdfme.com/node-export');
+  });
+
+  test('prefers document-canvas when both document and OffscreenCanvas exist', () => {
+    vi.stubGlobal('document', { createElement: () => ({}) });
+    vi.stubGlobal(
+      'OffscreenCanvas',
+      class {
+        constructor(
+          public width: number,
+          public height: number,
+        ) {}
+      },
+    );
+    expect(resolveBarcodeRenderRuntime()).toBe('document-canvas');
+  });
+});
+
 describe('mapHexColorForBwipJsLib text', () => {
   test('it strips a hex if there is one', () => {
     expect(mapHexColorForBwipJsLib('#ffffff')).toEqual('ffffff');
@@ -377,5 +507,14 @@ describe('mapHexColorForBwipJsLib text', () => {
   });
   test('it defaults to black if neither color nor fallback passed', () => {
     expect(mapHexColorForBwipJsLib(undefined)).toEqual('000000');
+  });
+  test('it drops the alpha channel so bwip-js never receives 8- or 4-digit hex', () => {
+    expect(mapHexColorForBwipJsLib('#ff000080')).toEqual('ff0000');
+    expect(mapHexColorForBwipJsLib('#f008')).toEqual('f00');
+    expect(mapHexColorForBwipJsLib(undefined, '#ff000080')).toEqual('ff0000');
+    expect(mapHexColorForBwipJsLib(undefined, '#f008')).toEqual('f00');
+  });
+  test('it keeps hash-less colors untouched (legacy bwip-js RRGGBB/CCMMYYKK format)', () => {
+    expect(mapHexColorForBwipJsLib('ff000080')).toEqual('ff000080');
   });
 });

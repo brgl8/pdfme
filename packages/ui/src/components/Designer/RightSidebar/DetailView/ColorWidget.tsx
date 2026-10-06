@@ -1,6 +1,5 @@
 import React, { useEffect, useState } from 'react';
 import { ColorPicker, Input, Space } from 'antd';
-import type { Color } from 'antd/es/color-picker';
 
 // form-render passes these props to a field widget. We override the built-in
 // `color` widget because form-render's bundled `rc-color-picker` relies on
@@ -17,28 +16,30 @@ export interface ColorWidgetProps {
 }
 
 const DEFAULT_COLOR = '#000000';
-// 6-digit hex, or 8-digit hex when a field opts into alpha (disabledAlpha={false}).
-const HEX_COLOR_REGEXP = /^#(?:[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$/;
-
-// A value is safe to forward to the schema only when it is a valid hex color or
-// empty (clearing the field). This keeps invalid free-text out of PDF rendering.
-const isCommittableColor = (value: string) => value === '' || HEX_COLOR_REGEXP.test(value);
+// Matches isHexValid in @pdfme/common: 3/4/6/8-digit hex, where 4/8-digit carry alpha.
+const HEX_COLOR_REGEXP = /^#(?:[0-9A-Fa-f]{3,4}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$/;
+// 3/4-digit shorthand is ambiguous while typing ("#ff0" may be a prefix of
+// "#ff0000"), so keystrokes only commit the unambiguous 6/8-digit forms; the
+// shorthand forms commit on blur/Enter instead.
+const FULL_HEX_COLOR_REGEXP = /^#(?:[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$/;
 
 const ColorWidget = (props: ColorWidgetProps) => {
-  // Default alpha off so the picker emits 6-digit hex; fields can opt in with
-  // disabledAlpha={false}, in which case 8-digit hex is intentional.
-  const { value, onChange, disabled, disabledAlpha = true, readOnly, className, style } = props;
+  // Alpha is enabled by default; the picker emits 8-digit hex when alpha < 100%.
+  // Fields whose renderer cannot handle alpha (barcode bar/text colors) opt out
+  // with disabledAlpha={true}.
+  const { value, onChange, disabled, disabledAlpha = false, readOnly, className, style } = props;
 
-  // Local color value that updates during dragging but doesn't trigger parent onChange
-  const [localColor, setLocalColor] = useState<string>(value ?? DEFAULT_COLOR);
-  
+  // The picker's colour while it is open: committed on release (onChangeComplete) and when the
+  // picker closes (the alpha field changes it without a release), never on every move: the
+  // parent re-rendering under the open picker closes it after the first change.
+  const [localColor, setLocalColor] = useState<string>(value || DEFAULT_COLOR);
+
   // Keep a local copy so the text input stays responsive while the user types an
   // intermediate value (e.g. "#ff00") that is not yet a valid color.
   const [inputValue, setInputValue] = useState(value ?? '');
 
-  // Sync localColor when value prop changes from parent
   useEffect(() => {
-    setLocalColor(value ?? DEFAULT_COLOR);
+    setLocalColor(value || DEFAULT_COLOR);
     setInputValue(value ?? '');
   }, [value]);
 
@@ -46,11 +47,27 @@ const ColorWidget = (props: ColorWidgetProps) => {
     return <span style={style}>{value || ''}</span>;
   }
 
+  // An empty field commits '' ("no colour"): undefined would let the schema fall back to its
+  // default colour.
   const commit = (next: string) => {
+    onChange?.(next);
+  };
+
+  const handleInputChange = (next: string) => {
     setInputValue(next);
-    setLocalColor(next);
-    if (isCommittableColor(next)) {
-      onChange?.(next); //?.(next === '' ? undefined : next);
+    if (next === '' || FULL_HEX_COLOR_REGEXP.test(next)) {
+      commit(next);
+    }
+  };
+
+  // Blur/Enter is the "done typing" signal: valid shorthand commits here, and
+  // invalid free-text reverts to the last committed value. This keeps invalid
+  // colors out of PDF rendering.
+  const handleInputCommit = () => {
+    if (HEX_COLOR_REGEXP.test(inputValue)) {
+      commit(inputValue);
+    } else if (inputValue !== '') {
+      setInputValue(value ?? '');
     }
   };
 
@@ -60,16 +77,15 @@ const ColorWidget = (props: ColorWidgetProps) => {
         value={localColor}
         disabled={disabled}
         disabledAlpha={disabledAlpha}
-        onChange={(color: Color) => {
-          const hex = color.toHexString();
-          // Update local display values but don't trigger parent onChange yet
-          setLocalColor(hex);
-          setInputValue(hex);
+        format="hex"
+        onChange={(color) => {
+          const next = color.toHexString();
+          setLocalColor(next);
+          setInputValue(next);
         }}
-        onChangeComplete={(color: Color) => {
-          const hex = color.toHexString();
-          // Now commit the final value to the parent
-          commit(hex);
+        onChangeComplete={(color) => commit(color.toHexString())}
+        onOpenChange={(open) => {
+          if (!open && localColor !== (value || DEFAULT_COLOR)) commit(localColor);
         }}
       />
       <Input
@@ -77,7 +93,9 @@ const ColorWidget = (props: ColorWidgetProps) => {
         placeholder={DEFAULT_COLOR}
         disabled={disabled}
         value={inputValue}
-        onChange={(ev) => commit(ev.target.value)}
+        onChange={(ev) => handleInputChange(ev.target.value)}
+        onBlur={handleInputCommit}
+        onPressEnter={handleInputCommit}
       />
     </Space.Compact>
   );

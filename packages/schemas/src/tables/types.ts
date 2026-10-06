@@ -2,6 +2,11 @@ import type { ALIGNMENT, VERTICAL_ALIGNMENT } from '../text/types.js';
 import type { BoxDimension } from '../box.js';
 import type { Schema } from '@pdfme/common';
 
+export const TABLE_CELL_TYPES = ['text', 'image'] as const;
+export type TableCellType = (typeof TABLE_CELL_TYPES)[number];
+export const TABLE_IMAGE_HEIGHT_MODES = ['fixed', 'auto'] as const;
+export type TableImageHeightMode = (typeof TABLE_IMAGE_HEIGHT_MODES)[number];
+
 export type Spacing = BoxDimension;
 type BorderInsets = Spacing;
 type BoxDimensions = Spacing;
@@ -20,7 +25,16 @@ export interface CellStyle {
   padding: BoxDimensions;
 }
 
-export type CellSchema = Schema & CellStyle;
+export type CellSchema = Schema &
+  CellStyle & {
+    cellType?: TableCellType;
+    imageHeightMode?: TableImageHeightMode;
+    imageHeight?: number;
+    columnIndex?: number;
+    rowIndex?: number;
+    // Render-only identity of the table being painted. Not stored on the template.
+    pickerSchemaKey?: string;
+  };
 
 export type TableSchema = Schema & {
   showHead: boolean;
@@ -36,6 +50,10 @@ export type TableSchema = Schema & {
   bodyStyles: CellStyle & { alternateBackgroundColor: string };
   columnStyles: {
     alignment?: { [colIndex: number]: ALIGNMENT };
+    verticalAlignment?: { [colIndex: number]: VERTICAL_ALIGNMENT };
+    cellType?: { [colIndex: number]: TableCellType };
+    imageHeightMode?: { [colIndex: number]: TableImageHeightMode };
+    imageHeight?: { [colIndex: number]: number };
   };
 };
 
@@ -54,6 +72,9 @@ export interface Styles {
   cellWidth: number;
   minCellHeight: number;
   minCellWidth: number;
+  cellType?: TableCellType;
+  imageHeightMode?: TableImageHeightMode;
+  imageHeight?: number;
 }
 
 export interface TableInput {
@@ -73,6 +94,9 @@ export interface Settings {
   margin: Spacing;
   tableWidth: number;
   showHead: boolean;
+  // Template showHead before a split segment hides the header. Auto image limits
+  // use this so planning and drawing stay on the same row height.
+  templateShowHead: boolean;
   tableLineWidth: number;
   tableLineColor: string;
 }

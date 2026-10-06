@@ -1,6 +1,7 @@
-import { b64toUint8Array } from '@pdfme/common';
+import { b64toUint8Array, isHexValid } from '@pdfme/common';
 import bwipjs, { RenderOptions } from 'bwip-js';
 import { Buffer } from 'buffer';
+import { splitHexAlpha } from '../utils.js';
 import { BARCODE_TYPES, DEFAULT_BARCODE_INCLUDETEXT } from './constants.js';
 import { BarcodeTypes } from './types.js';
 
@@ -122,12 +123,105 @@ export const barCodeType2Bcid = (type: BarcodeTypes) =>
   type === 'nw7' ? 'rationalizedCodabar' : type;
 
 /**
- *  Strip hash from the beginning of HTML hex color codes for the bwip.js lib
+ *  Strip hash from the beginning of HTML hex color codes for the bwip.js lib.
+ *  Any '#RGBA'/'#RRGGBBAA' alpha channel is dropped first (rendered opaque, like
+ *  AcroForm colors): bwip-js has no alpha support — it reads 8-digit hex as CMYK
+ *  and throws on 4-digit hex. Hash-less colors pass through untouched because
+ *  bwip-js natively treats those as RRGGBB/CCMMYYKK.
  */
-export const mapHexColorForBwipJsLib = (color: string | undefined, fallback?: string) =>
-  color ? color.replace('#', '') : fallback ? fallback.replace('#', '') : '000000';
+export const mapHexColorForBwipJsLib = (color: string | undefined, fallback?: string) => {
+  const hex = color || fallback;
+  return hex ? splitHexAlpha(hex).color.replace('#', '') : '000000';
+};
 
-export const createBarCode = async (arg: {
+/**
+ * Barcode colors historically accept bwip-js style hex without a leading '#';
+ * CSS and pdfme's color utils require the '#', so add it when missing.
+ */
+export const ensureHexColorHash = (color: string | undefined) =>
+  color && !color.startsWith('#') && isHexValid(`#${color}`) ? `#${color}` : color;
+
+export type BarcodeRenderRuntime = 'document-canvas' | 'offscreencanvas' | 'node-buffer';
+
+type CanvasLike = HTMLCanvasElement | OffscreenCanvas;
+
+type BwipJsRenderer = {
+  toCanvas?: (canvas: CanvasLike, options: RenderOptions) => void;
+  toBuffer?: (options: RenderOptions) => Promise<Buffer>;
+  toSVG?: (options: RenderOptions) => string;
+};
+
+const getBwipJsRenderer = () => bwipjs as unknown as BwipJsRenderer;
+
+const getDocument = () => (globalThis as { document?: Document }).document;
+
+const getOffscreenCanvasCtor = () =>
+  (globalThis as { OffscreenCanvas?: typeof OffscreenCanvas }).OffscreenCanvas;
+
+/**
+ * Pick a barcode renderer from capabilities, not `typeof window`.
+ * Browser Workers have neither `window` nor Node's `bwip-js.toBuffer()`.
+ * OffscreenCanvas without `toCanvas()` (Node bwip-js export) falls back to `toBuffer()`.
+ */
+export const resolveBarcodeRenderRuntime = (): BarcodeRenderRuntime => {
+  const doc = getDocument();
+  const renderer = getBwipJsRenderer();
+  if (doc && typeof doc.createElement === 'function') {
+    return 'document-canvas';
+  }
+
+  if (typeof getOffscreenCanvasCtor() === 'function' && typeof renderer.toCanvas === 'function') {
+    return 'offscreencanvas';
+  }
+
+  if (typeof renderer.toBuffer === 'function') {
+    return 'node-buffer';
+  }
+
+  throw new Error(
+    '[@pdfme/schemas] Barcode rendering requires a document canvas, OffscreenCanvas, or bwip-js toBuffer().',
+  );
+};
+
+const pngBufferFromDataUrl = (dataUrl: string): Buffer =>
+  Buffer.from(b64toUint8Array(dataUrl).buffer);
+
+const pngBufferFromBlob = async (blob: Blob): Promise<Buffer> =>
+  Buffer.from(await blob.arrayBuffer());
+
+const renderBarcodeToCanvas = (canvas: CanvasLike, options: RenderOptions) => {
+  const toCanvas = getBwipJsRenderer().toCanvas;
+  if (typeof toCanvas !== 'function') {
+    throw new Error('[@pdfme/schemas] bwip-js toCanvas() is not available in this environment.');
+  }
+  toCanvas(canvas, options);
+};
+
+const renderBarcodeToDocumentCanvas = (options: RenderOptions): Buffer => {
+  const canvas = getDocument()!.createElement('canvas');
+  renderBarcodeToCanvas(canvas, options);
+  return pngBufferFromDataUrl(canvas.toDataURL('image/png'));
+};
+
+const renderBarcodeToOffscreenCanvas = async (options: RenderOptions): Promise<Buffer> => {
+  const OffscreenCanvasCtor = getOffscreenCanvasCtor();
+  if (typeof OffscreenCanvasCtor !== 'function') {
+    throw new Error('[@pdfme/schemas] OffscreenCanvas is not available in this environment.');
+  }
+  const canvas = new OffscreenCanvasCtor(1, 1);
+  renderBarcodeToCanvas(canvas, options);
+  return pngBufferFromBlob(await canvas.convertToBlob({ type: 'image/png' }));
+};
+
+const renderBarcodeToNodeBuffer = async (options: RenderOptions): Promise<Buffer> => {
+  const toBuffer = getBwipJsRenderer().toBuffer;
+  if (typeof toBuffer !== 'function') {
+    throw new Error('[@pdfme/schemas] bwip-js toBuffer() is not available in this environment.');
+  }
+  return toBuffer(options);
+};
+
+type CreateBarCodeArg = {
   type: BarcodeTypes;
   input: string;
   width: number;
@@ -136,7 +230,9 @@ export const createBarCode = async (arg: {
   barColor?: string;
   textColor?: string;
   includetext?: boolean;
-}): Promise<Buffer> => {
+};
+
+const createBwipJsRenderOptions = (arg: CreateBarCodeArg): RenderOptions => {
   const {
     type,
     input,
@@ -164,24 +260,37 @@ export const createBarCode = async (arg: {
   if (barColor) bwipjsArg.barcolor = mapHexColorForBwipJsLib(barColor);
   if (textColor) bwipjsArg.textcolor = mapHexColorForBwipJsLib(textColor);
 
-  let res: Buffer;
+  return bwipjsArg;
+};
 
-  if (typeof window !== 'undefined') {
-    const canvas = document.createElement('canvas');
-    // Use a type assertion to safely call toCanvas
-    const bwipjsModule = bwipjs as unknown as {
-      toCanvas(canvas: HTMLCanvasElement, options: RenderOptions): void;
-    };
-    bwipjsModule.toCanvas(canvas, bwipjsArg);
-    const dataUrl = canvas.toDataURL('image/png');
-    res = Buffer.from(b64toUint8Array(dataUrl).buffer);
-  } else {
-    // Use a type assertion to safely call toBuffer
-    const bwipjsModule = bwipjs as unknown as {
-      toBuffer(options: RenderOptions): Promise<Buffer>;
-    };
-    res = await bwipjsModule.toBuffer(bwipjsArg);
+export const createBarCodeSvg = (arg: CreateBarCodeArg): string => {
+  const toSVG = getBwipJsRenderer().toSVG;
+  if (typeof toSVG !== 'function') {
+    throw new Error('[@pdfme/schemas] bwip-js toSVG() is not available in this environment.');
   }
 
-  return res;
+  const defaultFill = `#${mapHexColorForBwipJsLib(arg.barColor)}`;
+  const svg = toSVG(createBwipJsRenderOptions(arg)).replace(
+    /<svg\b(?![^>]*\sfill=)/,
+    `<svg fill="${defaultFill}"`,
+  );
+  if (/<image\b/i.test(svg)) {
+    throw new Error(
+      `[@pdfme/schemas] bwip-js emitted an embedded image for ${arg.type}; vector barcode PDF rendering requires path-based SVG.`,
+    );
+  }
+
+  return svg;
+};
+
+export const createBarCode = async (arg: CreateBarCodeArg): Promise<Buffer> => {
+  const bwipjsArg = createBwipJsRenderOptions(arg);
+  const runtime = resolveBarcodeRenderRuntime();
+  if (runtime === 'document-canvas') {
+    return renderBarcodeToDocumentCanvas(bwipjsArg);
+  }
+  if (runtime === 'offscreencanvas') {
+    return renderBarcodeToOffscreenCanvas(bwipjsArg);
+  }
+  return renderBarcodeToNodeBuffer(bwipjsArg);
 };

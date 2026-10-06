@@ -5,6 +5,7 @@ import generate from '../src/generate.js';
 import { Template, BLANK_PDF, Schema, type Plugin } from '@pdfme/common';
 import { PDFDocument } from '@pdfme/pdf-lib';
 import { getFont, getImageSnapshotOptions, pdfToImages } from './utils.js';
+import { multiVariableText, svg, text } from '@pdfme/schemas';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -112,6 +113,209 @@ describe('generate integrate test', () => {
       expect(observedPositions).toHaveLength(2);
       expect(observedPositions[0]).toEqual(observedPositions[1]);
       expect(observedPositions[0]).toEqual(probeSchema.position);
+    });
+
+    test('renders non-Latin SVG text with configured fonts', async () => {
+      const font = getFont();
+      const template: Template = {
+        basePdf: BLANK_PDF,
+        schemas: [
+          [
+            {
+              name: 'svgText',
+              type: 'svg',
+              content: '',
+              position: { x: 10, y: 10 },
+              width: 80,
+              height: 20,
+            },
+          ],
+        ],
+      };
+      const inputs = [
+        {
+          svgText:
+            '<svg viewBox="0 0 200 50" xmlns="http://www.w3.org/2000/svg"><text x="0" y="24" font-family="NotoSansJP" font-size="20">こんにちは</text></svg>',
+        },
+      ];
+
+      await expect(
+        generate({
+          inputs,
+          template,
+          plugins: { svg },
+          options: {
+            font: {
+              NotoSansJP: {
+                ...font.NotoSansJP,
+                fallback: true,
+                subset: false,
+              },
+            },
+          },
+        }),
+      ).resolves.toBeInstanceOf(Uint8Array);
+    });
+
+    test('renders rotated SVG schemas', async () => {
+      const pdf = await generate({
+        template: {
+          basePdf: { width: 80, height: 80, padding: [0, 0, 0, 0] },
+          schemas: [
+            [
+              {
+                name: 'rotatedSvg',
+                type: 'svg',
+                content: '',
+                position: { x: 25, y: 25 },
+                width: 30,
+                height: 20,
+                rotate: 35,
+              },
+            ],
+          ],
+        },
+        inputs: [
+          {
+            rotatedSvg:
+              '<svg viewBox="0 0 30 20" xmlns="http://www.w3.org/2000/svg"><rect width="30" height="20" fill="#ff0000"/><path d="M0 0 L30 0 L30 20 Z" fill="#0000ff"/></svg>',
+          },
+        ],
+        plugins: { svg },
+      });
+
+      const images = await pdfToImages(pdf);
+      expect(images).toHaveLength(1);
+      await expect(images[0]).toMatchImage(getImageSnapshotOptions('svg-rotate-1'));
+    });
+
+    test('does not embed unused fonts for SVG rendering', async () => {
+      const font = getFont();
+      const template: Template = {
+        basePdf: BLANK_PDF,
+        schemas: [
+          [
+            {
+              name: 'svgText',
+              type: 'svg',
+              content: '',
+              position: { x: 10, y: 10 },
+              width: 80,
+              height: 20,
+            },
+          ],
+        ],
+      };
+
+      await expect(
+        generate({
+          inputs: [
+            {
+              svgText:
+                '<svg viewBox="0 0 200 50" xmlns="http://www.w3.org/2000/svg"><text x="0" y="24" font-family="NotoSansJP" font-size="20">こんにちは</text></svg>',
+            },
+          ],
+          template,
+          plugins: { svg },
+          options: {
+            font: {
+              NotoSansJP: {
+                ...font.NotoSansJP,
+                fallback: true,
+                subset: false,
+              },
+              NotoSansJP_bold: {
+                data: Buffer.from([0]),
+              },
+            },
+          },
+        }),
+      ).resolves.toBeInstanceOf(Uint8Array);
+    });
+
+    test('renders SVG text with comma-separated font-family list', async () => {
+      const font = getFont();
+      const template: Template = {
+        basePdf: BLANK_PDF,
+        schemas: [
+          [
+            {
+              name: 'svgText',
+              type: 'svg',
+              content: '',
+              position: { x: 10, y: 10 },
+              width: 80,
+              height: 20,
+            },
+          ],
+        ],
+      };
+
+      await expect(
+        generate({
+          inputs: [
+            {
+              svgText:
+                '<svg viewBox="0 0 200 50" xmlns="http://www.w3.org/2000/svg"><text x="0" y="24" font-family="NotoSansJP, sans-serif" font-size="20">こんにちは</text></svg>',
+            },
+          ],
+          template,
+          plugins: { svg },
+          options: {
+            font: {
+              NotoSansJP: {
+                ...font.NotoSansJP,
+                fallback: true,
+                subset: false,
+              },
+              NotoSansJP_bold: {
+                data: Buffer.from([0]),
+              },
+            },
+          },
+        }),
+      ).resolves.toBeInstanceOf(Uint8Array);
+    });
+
+    test('renders SVG text when configured font key extends the font family', async () => {
+      const font = getFont();
+      const template: Template = {
+        basePdf: BLANK_PDF,
+        schemas: [
+          [
+            {
+              name: 'svgText',
+              type: 'svg',
+              content: '',
+              position: { x: 10, y: 10 },
+              width: 80,
+              height: 20,
+            },
+          ],
+        ],
+      };
+
+      await expect(
+        generate({
+          inputs: [
+            {
+              svgText:
+                '<svg viewBox="0 0 200 50" xmlns="http://www.w3.org/2000/svg"><text x="0" y="24" font-family="NotoSansJP" font-size="20">こんにちは</text></svg>',
+            },
+          ],
+          template,
+          plugins: { svg },
+          options: {
+            font: {
+              'NotoSansJP-Regular': {
+                ...font['NotoSansJP-Regular'],
+                fallback: true,
+                subset: false,
+              },
+            },
+          },
+        }),
+      ).resolves.toBeInstanceOf(Uint8Array);
     });
 
     test('loads permission encrypted custom base PDFs with empty password fallback', async () => {
@@ -435,7 +639,7 @@ ERROR MESSAGE: Too small: expected array to have >=1 items
     } catch (e: any) {
       expect(e.message).toEqual(
         `[@pdfme/common] fallback flag is not found in font. true fallback flag must be only one.
-Check this document: https://pdfme.com/docs/custom-fonts#about-font-type`
+Check this document: https://pdfme.com/docs/custom-fonts#about-font-type`,
       );
     }
   });
@@ -466,7 +670,7 @@ Check this document: https://pdfme.com/docs/custom-fonts#about-font-type`
     } catch (e: any) {
       expect(e.message).toEqual(
         `[@pdfme/common] 2 fallback flags found in font. true fallback flag must be only one.
-Check this document: https://pdfme.com/docs/custom-fonts#about-font-type`
+Check this document: https://pdfme.com/docs/custom-fonts#about-font-type`,
       );
     }
   });
@@ -502,8 +706,198 @@ Check this document: https://pdfme.com/docs/custom-fonts#about-font-type`
     } catch (e: any) {
       expect(e.message).toEqual(
         `[@pdfme/common] DUMMY_FONT of template.schemas is not found in font.
-Check this document: https://pdfme.com/docs/custom-fonts`
+Check this document: https://pdfme.com/docs/custom-fonts`,
       );
     }
+  });
+});
+
+describe('malformed placeholders (#1309)', () => {
+  test('keeps unmatched braces as literals in schema, staticSchema, and dynamic layout values', async () => {
+    const rendered: Array<{ name: string; value: string }> = [];
+    const wrappingText: Plugin = {
+      ...text,
+      pdf: async (props) => {
+        rendered.push({ name: props.schema.name, value: props.value });
+        await text.pdf(props);
+      },
+    };
+
+    const pdf = await generate({
+      template: {
+        basePdf: {
+          width: 210,
+          height: 297,
+          padding: [10, 10, 10, 10],
+          staticSchema: [
+            {
+              name: 'staticLabel',
+              type: 'text',
+              content: 'static {1+1} {{1}',
+              position: { x: 10, y: 250 },
+              width: 120,
+              height: 10,
+              readOnly: true,
+              fontSize: 10,
+            },
+          ],
+        },
+        schemas: [
+          [
+            {
+              name: 'broken',
+              type: 'text',
+              content: '{{1}',
+              readOnly: true,
+              position: { x: 10, y: 10 },
+              width: 80,
+              height: 10,
+              fontSize: 12,
+            },
+            {
+              name: 'valid',
+              type: 'text',
+              content: '{1+1}',
+              readOnly: true,
+              position: { x: 10, y: 25 },
+              width: 80,
+              height: 10,
+              fontSize: 12,
+            },
+            {
+              name: 'mixed',
+              type: 'text',
+              content: 'ok {1+1} bad {{1}',
+              readOnly: true,
+              position: { x: 10, y: 40 },
+              width: 80,
+              height: 10,
+              fontSize: 12,
+            },
+            {
+              name: 'body',
+              type: 'text',
+              content: '',
+              overflow: 'expand',
+              position: { x: 10, y: 55 },
+              width: 80,
+              height: 8,
+              fontSize: 12,
+            },
+          ],
+        ],
+      },
+      inputs: [{ body: 'expand me' }],
+      options: { font: getFont() },
+      plugins: { text: wrappingText },
+    });
+
+    const byName = Object.fromEntries(rendered.map((item) => [item.name, item.value]));
+    expect(byName.broken).toBe('{{1}');
+    expect(byName.valid).toBe('2');
+    expect(byName.mixed).toBe('ok 2 bad {{1}');
+    expect(byName.staticLabel).toBe('static 2 {{1}');
+    expect(byName.body).toBe('expand me');
+
+    const pdfDoc = await PDFDocument.load(pdf);
+    expect(pdfDoc.getPageCount()).toBeGreaterThan(0);
+    expect(pdf.byteLength).toBeGreaterThan(1000);
+
+    // Inspect the real text plugin output; do not add test-only text to the PDF.
+    const images = await pdfToImages(pdf);
+    expect(images).toHaveLength(1);
+    await expect(images[0]).toMatchImage({
+      ...getImageSnapshotOptions('malformed-placeholders'),
+      // A short missing literal affects fewer pixels than the usual full-page tolerance.
+      allowedPixelRatio: 0,
+    });
+  });
+});
+
+describe('read-only multiVariableText (#1345)', () => {
+  test('renders substituted schema.text instead of the JSON key', async () => {
+    const incoming: Array<{ name: string; value: string }> = [];
+    const drawn: string[] = [];
+    const wrappingMvt: Plugin = {
+      ...multiVariableText,
+      pdf: async (props) => {
+        incoming.push({ name: props.schema.name, value: props.value });
+        const originalDrawText = props.page.drawText.bind(props.page);
+        props.page.drawText = ((text: string, options?: Parameters<typeof originalDrawText>[1]) => {
+          drawn.push(text);
+          return originalDrawText(text, options);
+        }) as typeof props.page.drawText;
+        await multiVariableText.pdf(props);
+      },
+    };
+
+    const pdf = await generate({
+      template: {
+        basePdf: {
+          width: 210,
+          height: 297,
+          padding: [10, 10, 10, 10],
+          staticSchema: [
+            {
+              name: 'staticFullName',
+              type: 'multiVariableText',
+              readOnly: true,
+              text: '{lastName}, {firstName}',
+              variables: ['firstName', 'lastName'],
+              content: JSON.stringify({ lastName: 'Smith', firstName: 'John' }),
+              position: { x: 10, y: 250 },
+              width: 120,
+              height: 10,
+              fontSize: 10,
+            },
+          ],
+        },
+        schemas: [
+          [
+            {
+              name: 'fullName',
+              type: 'multiVariableText',
+              readOnly: true,
+              text: '{lastName}, {firstName}',
+              variables: ['firstName', 'lastName'],
+              content: JSON.stringify({ lastName: 'Smith', firstName: 'John' }),
+              position: { x: 10, y: 10 },
+              width: 80,
+              height: 10,
+              fontSize: 12,
+            },
+            {
+              name: 'info',
+              type: 'multiVariableText',
+              readOnly: false,
+              text: 'Invoice No.{InvoiceNo}',
+              variables: ['InvoiceNo', 'Date'],
+              content: JSON.stringify({ InvoiceNo: '00000', Date: 'unused' }),
+              position: { x: 10, y: 25 },
+              width: 80,
+              height: 10,
+              fontSize: 12,
+            },
+          ],
+        ],
+      },
+      inputs: [{ info: JSON.stringify({ InvoiceNo: '12345', Date: '16 June 2025' }) }],
+      options: { font: getFont() },
+      plugins: { multiVariableText: wrappingMvt },
+    });
+
+    const incomingByName = Object.fromEntries(incoming.map((item) => [item.name, item.value]));
+    const variableJson = JSON.stringify({ lastName: 'Smith', firstName: 'John' });
+    expect(incomingByName.fullName).toBe(variableJson);
+    expect(incomingByName.staticFullName).toBe(variableJson);
+    expect(incomingByName.info).toBe(JSON.stringify({ InvoiceNo: '12345', Date: '16 June 2025' }));
+    expect(Object.values(incomingByName)).not.toContain('lastName');
+    expect(drawn.join('\n')).toContain('Smith, John');
+    expect(drawn.join('\n')).toContain('Invoice No.12345');
+    expect(drawn.join('\n')).not.toContain('lastName');
+
+    const pdfDoc = await PDFDocument.load(pdf);
+    expect(pdfDoc.getPageCount()).toBe(1);
+    expect(pdf.byteLength).toBeGreaterThan(1000);
   });
 });

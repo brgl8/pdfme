@@ -39,6 +39,7 @@ import { mergeTextLineRangeValue } from '../src/text/measure.js';
 import { shouldUseDynamicFontSize } from '../src/text/overflow.js';
 import { propPanel as textPropPanel } from '../src/text/propPanel.js';
 import { getDynamicLayoutForMultiVariableText } from '../src/multiVariableText/dynamicTemplate.js';
+import { pdfRender } from '../src/text/pdfRender.js';
 
 import { FontWidthCalcValues, TextSchema } from '../src/text/types.js';
 import type { MultiVariableTextSchema } from '../src/multiVariableText/types.js';
@@ -123,6 +124,26 @@ const getOverflowOptionValues = (schema: Record<string, PropPanelSchema>) => {
   };
   return overflow.props.options.map((option) => option.value);
 };
+
+describe('text pdfRender', () => {
+  it('does not draw background decoration for empty values', async () => {
+    const drawRectangle = vi.fn();
+    const schema = getTextSchema();
+
+    await pdfRender({
+      value: '',
+      schema,
+      pdfDoc: {} as never,
+      pdfLib: {} as never,
+      page: { getHeight: () => mm2pt(297), drawRectangle } as never,
+      options: { font: getSampleFont() },
+      basePdf: { width: 210, height: 297, padding: [0, 0, 0, 0] },
+      _cache: new Map(),
+    });
+
+    expect(drawRectangle).not.toHaveBeenCalled();
+  });
+});
 
 describe('parseInlineMarkdown', () => {
   it('parses supported inline markdown styles', () => {
@@ -627,6 +648,31 @@ describe('text dynamic layout', () => {
 
     expect(result.heights[0]).toBeGreaterThan(5);
   });
+
+  it('expands read-only multiVariableText from variable JSON instead of an expression key', async () => {
+    const schema = {
+      ...getTextSchema(),
+      name: 'fullName',
+      type: 'multiVariableText',
+      readOnly: true,
+      height: 5,
+      width: 20,
+      overflow: 'expand',
+      text: '{lastName}, {firstName}',
+      variables: ['firstName', 'lastName'],
+      content: JSON.stringify({
+        lastName: 'Smith',
+        firstName: 'John '.repeat(40).trim(),
+      }),
+    } as MultiVariableTextSchema;
+
+    const result = await getDynamicLayoutForMultiVariableText('lastName', {
+      ...baseArgs,
+      schema,
+    });
+
+    expect(result.heights[0]).toBeGreaterThan(5);
+  });
 });
 
 describe('layoutRichTextLines', () => {
@@ -652,11 +698,11 @@ describe('layoutRichTextLines', () => {
       boxWidthInPt: 6,
     });
 
-    expect(lines.map(getRichTextLineText)).toEqual(['x ', 'hello']);
+    expect(lines.map(getRichTextLineText)).toEqual(['x', 'hello']);
     expect(lines[1].runs.map((run) => run.text)).toEqual(['he', 'llo']);
   });
 
-  it('wraps before splitting an oversized token at the end of a line', () => {
+  it('keeps a word on the next line when it still fits the full box', () => {
     const lines = layoutRichTextLines({
       runs: [createRun('abc '), createRun('123456', { code: true })],
       fontSize: 12,
@@ -664,7 +710,24 @@ describe('layoutRichTextLines', () => {
       boxWidthInPt: 7,
     });
 
-    expect(lines.map(getRichTextLineText)).toEqual(['abc ', '1234', '56']);
+    // Wrap-point spaces are trimmed like plain text. code padding can still
+    // force a grapheme split, but not by parking 123456 wholly on the next line.
+    const texts = lines.map(getRichTextLineText);
+    expect(texts[0]?.startsWith('abc')).toBe(true);
+    expect(texts.join('')).toBe('abc123456');
+    expect(texts.some((text) => text.startsWith('123456'))).toBe(false);
+  });
+
+  it('fills remaining current-line width before splitting a word wider than the box', () => {
+    const lines = layoutRichTextLines({
+      runs: [createRun('xx abcdefgh')],
+      fontSize: 12,
+      characterSpacing: 0,
+      boxWidthInPt: 4,
+    });
+
+    expect(lines.map(getRichTextLineText)).toEqual(['xx a', 'bcde', 'fgh']);
+    expect(lines.map((line) => line.hardBreak)).toEqual([false, false, true]);
   });
 });
 
@@ -710,6 +773,41 @@ describe('calculateDynamicRichTextFontSize', () => {
         value: 'abcdef',
       }),
     );
+  });
+
+  it('computes the same size as plain text for leading empty lines', async () => {
+    const fontKitFont = await getFontKitFont('SauceHanSansJP', getSampleFont(), new Map());
+    const schema: TextSchema = {
+      ...getTextSchema(),
+      fontName: 'SauceHanSansJP',
+      width: 60,
+      height: 25,
+      fontSize: 13,
+      characterSpacing: 0,
+      lineHeight: 1,
+      dynamicFontSize: { min: 4, max: 30, fit: 'vertical' },
+    };
+    const value = '\n\nhello world';
+    const font = getSampleFont();
+    const cache = new Map<string | number, FontKitFont>([
+      ['getFontKitFont-SauceHanSansJP', fontKitFont],
+    ]);
+
+    const plainSize = calculateDynamicFontSize({
+      textSchema: schema,
+      fontKitFont,
+      value,
+    });
+    const markdownSize = await calculateDynamicRichTextFontSize({
+      value,
+      schema: { ...schema, textFormat: 'inline-markdown', readOnly: true },
+      font,
+      _cache: cache,
+    });
+
+    expect(plainSize).toBeGreaterThan(4);
+    expect(plainSize).toBeLessThan(30);
+    expect(markdownSize).toBe(plainSize);
   });
 });
 

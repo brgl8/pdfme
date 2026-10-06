@@ -1,7 +1,11 @@
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   SchemaForUI,
   Schema,
   Template,
+  BLANK_A4_PDF,
   BLANK_PDF,
   BasePdf,
   PAGE_SIZE_PRESETS,
@@ -10,8 +14,10 @@ import {
 } from '@pdfme/common';
 import {
   uuid,
+  stabilizeSchemaIds,
   getUniqueSchemaName,
   schemasList2template,
+  normalizeSchemasListForBasePdf,
   changeSchemas,
   clampZoomLevel,
   getFitZoomLevel,
@@ -19,8 +25,29 @@ import {
   getDynamicHeightReflowChanges,
   restoreZoomAnchor,
   setFontNameRecursively,
+  getStickyScrollPageIndex,
+  isRotatableSchema,
 } from '../src/helper';
-import { text, image } from '@pdfme/schemas';
+import {
+  text,
+  image,
+  multiVariableText,
+  list,
+  signature,
+  svg,
+  table,
+  barcodes,
+  line,
+  rectangle,
+  ellipse,
+  dateTime,
+  date,
+  time,
+  select,
+  radioGroup,
+  checkbox,
+  circleMark,
+} from '@pdfme/schemas';
 
 const getSchema = (): Schema => ({
   name: 'a',
@@ -165,6 +192,39 @@ describe('getUniqSchemaName test', () => {
   });
 });
 
+describe('stabilizeSchemaIds test', () => {
+  test('reuses the same id for the same schema name across calls', () => {
+    const idMap = new Map<string, string>();
+    const schema = { ...getSchema(), name: 'staticMvt' };
+
+    const first = stabilizeSchemaIds([schema], idMap);
+    const second = stabilizeSchemaIds([{ ...schema, content: 'changed' }], idMap);
+
+    expect(first[0].id).toBe(second[0].id);
+    expect(first[0].id).toBeTruthy();
+    expect(idMap.get('staticMvt')).toBe(first[0].id);
+  });
+
+  test('ignores a caller-supplied id and reuses the generated runtime id', () => {
+    const idMap = new Map<string, string>();
+    const schema = { ...getSchema(), name: 'header', id: 'foo[' } as SchemaForUI;
+
+    const [first] = stabilizeSchemaIds([schema], idMap);
+    const [second] = stabilizeSchemaIds([{ ...getSchema(), name: 'header', id: 'foo[' }], idMap);
+
+    expect(first.id).toBeTruthy();
+    expect(first.id).not.toBe('foo[');
+    expect(second.id).toBe(first.id);
+    expect(idMap.get('header')).toBe(first.id);
+  });
+
+  test('does not mutate the source schema', () => {
+    const schema = { ...getSchema(), name: 'footer' };
+    stabilizeSchemaIds([schema], new Map());
+    expect(schema).not.toHaveProperty('id');
+  });
+});
+
 describe('schemasList2template test', () => {
   test('schemasList2template normal', () => {
     const template: Template = {
@@ -215,6 +275,41 @@ describe('schemasList2template test', () => {
         ],
       ],
     });
+  });
+});
+
+describe('normalizeSchemasListForBasePdf', () => {
+  const page = (id: string): SchemaForUI[] => [
+    { id, name: id, type: 'text', position: { x: 0, y: 0 }, width: 10, height: 10 },
+  ];
+
+  test('pads a non-blank base PDF with distinct empty pages', () => {
+    const schemas = [page('a')];
+    const result = normalizeSchemasListForBasePdf(schemas, BLANK_PDF, 3);
+
+    expect(result).toHaveLength(3);
+    expect(result[0]).toBe(schemas[0]);
+    expect(result[1]).toEqual([]);
+    expect(result[2]).toEqual([]);
+    expect(result[1]).not.toBe(result[2]);
+  });
+
+  test('truncates a non-blank base PDF to the loaded page count', () => {
+    const schemas = [page('a'), page('b'), page('c')];
+
+    expect(normalizeSchemasListForBasePdf(schemas, BLANK_PDF, 1)).toEqual([schemas[0]]);
+  });
+
+  test('leaves a blank base PDF at the snapshot length', () => {
+    const schemas = [page('a'), page('b')];
+
+    expect(normalizeSchemasListForBasePdf(schemas, BLANK_A4_PDF, 1)).toBe(schemas);
+  });
+
+  test('does not wipe schemas when the base PDF page count is not loaded', () => {
+    const schemas = [page('a'), page('b')];
+
+    expect(normalizeSchemasListForBasePdf(schemas, BLANK_PDF, 0)).toBe(schemas);
   });
 });
 
@@ -391,6 +486,8 @@ describe('changeSchemas test', () => {
         position: { x: 0, y: 0 },
         width: 40,
         height: 40,
+        objectFit: 'contain',
+        objectPosition: 'center center',
         opacity: 1,
         rotate: 0,
       },
@@ -797,5 +894,284 @@ describe('zoom helpers', () => {
 
     expect(container.scrollLeft).toBe(120);
     expect(container.scrollTop).toBe(130);
+  });
+});
+
+describe('getStickyScrollPageIndex', () => {
+  const mockRect = ({
+    left,
+    top,
+    width,
+    height,
+  }: {
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  }) =>
+    ({
+      left,
+      top,
+      right: left + width,
+      bottom: top + height,
+      width,
+      height,
+    }) as DOMRect;
+
+  const setupPapers = (
+    containerRect: DOMRect,
+    paperRects: Array<{ left: number; top: number; width: number; height: number }>,
+    scroll?: { scrollTop: number; clientHeight: number; scrollHeight: number },
+  ) => {
+    const container = document.createElement('div');
+    vi.spyOn(container, 'getBoundingClientRect').mockReturnValue(containerRect);
+    if (scroll) {
+      Object.defineProperty(container, 'clientHeight', {
+        configurable: true,
+        value: scroll.clientHeight,
+      });
+      Object.defineProperty(container, 'scrollHeight', {
+        configurable: true,
+        value: scroll.scrollHeight,
+      });
+      container.scrollTop = scroll.scrollTop;
+    }
+    const papers = paperRects.map((rect) => {
+      const paper = document.createElement('div');
+      vi.spyOn(paper, 'getBoundingClientRect').mockReturnValue(mockRect(rect));
+      return paper;
+    });
+    return { container, papers };
+  };
+
+  const viewport = mockRect({ left: 0, top: 0, width: 100, height: 100 });
+  const midScroll = { scrollTop: 80, clientHeight: 100, scrollHeight: 260 };
+  const tallViewport = mockRect({ left: 0, top: 0, width: 600, height: 700 });
+  const tallContentScroll = { clientHeight: 700, scrollHeight: 825 };
+
+  test('keeps the current page while a quarter of the viewport still shows it', () => {
+    const { container, papers } = setupPapers(
+      viewport,
+      [
+        { left: 0, top: -60, width: 100, height: 100 },
+        { left: 0, top: 40, width: 100, height: 100 },
+      ],
+      midScroll,
+    );
+
+    expect(getStickyScrollPageIndex(container, papers, 0)).toBe(0);
+  });
+
+  test('keeps the current page at exactly 25% remaining height', () => {
+    const { container, papers } = setupPapers(
+      viewport,
+      [
+        { left: 0, top: -75, width: 100, height: 100 },
+        { left: 0, top: 25, width: 100, height: 100 },
+      ],
+      midScroll,
+    );
+
+    expect(getStickyScrollPageIndex(container, papers, 0)).toBe(0);
+  });
+
+  test('switches after the current page is mostly gone', () => {
+    const { container, papers } = setupPapers(
+      viewport,
+      [
+        { left: 0, top: -85, width: 100, height: 100 },
+        { left: 0, top: 15, width: 100, height: 100 },
+      ],
+      midScroll,
+    );
+
+    expect(getStickyScrollPageIndex(container, papers, 0)).toBe(1);
+  });
+
+  test('switches when remaining height is below 25%', () => {
+    const { container, papers } = setupPapers(
+      viewport,
+      [
+        { left: 0, top: -76, width: 100, height: 100 },
+        { left: 0, top: 24, width: 100, height: 100 },
+      ],
+      midScroll,
+    );
+
+    expect(getStickyScrollPageIndex(container, papers, 0)).toBe(1);
+  });
+
+  test('keeps the current page when scrolling back while it still has a remainder', () => {
+    const { container, papers } = setupPapers(
+      viewport,
+      [
+        { left: 0, top: -30, width: 100, height: 100 },
+        { left: 0, top: 70, width: 100, height: 100 },
+      ],
+      midScroll,
+    );
+
+    expect(getStickyScrollPageIndex(container, papers, 1)).toBe(1);
+  });
+
+  test('does not change page when nothing is visible', () => {
+    const { container, papers } = setupPapers(
+      viewport,
+      [
+        { left: 200, top: 200, width: 100, height: 100 },
+        { left: 200, top: 320, width: 100, height: 100 },
+      ],
+      midScroll,
+    );
+
+    expect(getStickyScrollPageIndex(container, papers, 0)).toBe(0);
+  });
+
+  test('switches to the most visible last page at the bottom even if the previous page is still 25% visible', () => {
+    const { container, papers } = setupPapers(
+      tallViewport,
+      [
+        { left: 0, top: -125, width: 500, height: 400 },
+        { left: 0, top: 300, width: 500, height: 400 },
+      ],
+      { ...tallContentScroll, scrollTop: 125 },
+    );
+
+    expect(getStickyScrollPageIndex(container, papers, 0)).toBe(1);
+  });
+
+  test('switches to the most visible first page at the top even if the current page is still 25% visible', () => {
+    const { container, papers } = setupPapers(
+      tallViewport,
+      [
+        { left: 0, top: 0, width: 500, height: 400 },
+        { left: 0, top: 425, width: 500, height: 400 },
+      ],
+      { ...tallContentScroll, scrollTop: 0 },
+    );
+
+    expect(getStickyScrollPageIndex(container, papers, 1)).toBe(0);
+  });
+
+  test('treats a fractional scrollTop near the bottom as the end', () => {
+    const { container, papers } = setupPapers(
+      tallViewport,
+      [
+        { left: 0, top: -125, width: 500, height: 400 },
+        { left: 0, top: 300, width: 500, height: 400 },
+      ],
+      { ...tallContentScroll, scrollTop: 124.6 },
+    );
+
+    expect(getStickyScrollPageIndex(container, papers, 0)).toBe(1);
+  });
+
+  test('does not treat a non-scrollable container as a scroll edge', () => {
+    const { container, papers } = setupPapers(
+      tallViewport,
+      [
+        { left: 0, top: -125, width: 500, height: 400 },
+        { left: 0, top: 300, width: 500, height: 400 },
+      ],
+      { scrollTop: 0, clientHeight: 700, scrollHeight: 700 },
+    );
+
+    expect(getStickyScrollPageIndex(container, papers, 0)).toBe(0);
+  });
+
+  test('does not force the last page when it is not the most visible at the bottom', () => {
+    const { container, papers } = setupPapers(
+      tallViewport,
+      [
+        { left: 0, top: -50, width: 500, height: 700 },
+        { left: 0, top: 670, width: 500, height: 50 },
+      ],
+      { scrollTop: 50, clientHeight: 700, scrollHeight: 750 },
+    );
+
+    expect(getStickyScrollPageIndex(container, papers, 0)).toBe(0);
+  });
+
+  test('switches when the current page has no horizontal overlap', () => {
+    const { container, papers } = setupPapers(
+      tallViewport,
+      [
+        { left: -600, top: -300, width: 500, height: 700 },
+        { left: -600, top: 425, width: 1200, height: 700 },
+      ],
+      { scrollTop: 300, clientHeight: 700, scrollHeight: 1125 },
+    );
+
+    expect(getStickyScrollPageIndex(container, papers, 0)).toBe(1);
+  });
+});
+
+describe('isRotatableSchema (#1631)', () => {
+  test('rotate absent from defaultSchema returns false', () => {
+    expect(isRotatableSchema({ type: 'custom' })).toBe(false);
+  });
+
+  test('rotate: undefined (spread inheritance opt-out) returns false', () => {
+    expect(isRotatableSchema({ ...text.propPanel.defaultSchema, rotate: undefined })).toBe(false);
+  });
+
+  test('rotate: 0 returns true', () => {
+    expect(isRotatableSchema({ type: 'custom', rotate: 0 })).toBe(true);
+  });
+
+  test('rotate: 90 returns true', () => {
+    expect(isRotatableSchema({ type: 'custom', rotate: 90 })).toBe(true);
+  });
+
+  test('missing defaultSchema returns false', () => {
+    expect(isRotatableSchema(undefined)).toBe(false);
+  });
+
+  test('built-in plugins keep their current rotatability', () => {
+    const builtIns = {
+      text,
+      image,
+      multiVariableText,
+      list,
+      signature,
+      svg,
+      table,
+      line,
+      rectangle,
+      ellipse,
+      dateTime,
+      date,
+      time,
+      select,
+      radioGroup,
+      checkbox,
+      circleMark,
+      ...barcodes,
+    };
+    for (const [name, plugin] of Object.entries(builtIns)) {
+      const defaultSchema = plugin.propPanel.defaultSchema as Record<string, unknown>;
+      // The rule Canvas used before the fix ('rotate' in defaultSchema) must
+      // agree with the shared helper for every built-in, so none of them
+      // gains or loses its rotate handle.
+      const legacyCanvasRule = 'rotate' in defaultSchema;
+      expect(isRotatableSchema(defaultSchema), `plugin: ${name}`).toBe(legacyCanvasRule);
+    }
+  });
+});
+
+describe('hotkeys-js version floor (#1465)', () => {
+  test('declared range cannot resolve 4.0.0–4.0.3', () => {
+    const pkgPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json');
+    const { dependencies } = JSON.parse(readFileSync(pkgPath, 'utf8')) as {
+      dependencies: Record<string, string>;
+    };
+    const range = dependencies['hotkeys-js'];
+    const match = range?.trim().match(/^(?:\^|~|>=)?(\d+)\.(\d+)\.(\d+)$/);
+    expect(match, `unexpected hotkeys-js range: ${range}`).not.toBeNull();
+    const major = Number(match![1]);
+    const minor = Number(match![2]);
+    const patch = Number(match![3]);
+    const atLeast404 = major > 4 || (major === 4 && (minor > 0 || patch >= 4));
+    expect(atLeast404).toBe(true);
   });
 });

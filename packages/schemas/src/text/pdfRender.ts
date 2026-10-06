@@ -1,10 +1,8 @@
-import { PDFFont, PDFDocument } from '@pdfme/pdf-lib';
 import type { Font as FontKitFont } from 'fontkit';
 import type { TextSchema } from './types.js';
 import {
   PDFRenderProps,
   ColorType,
-  Font,
   getDefaultFont,
   getFallbackFontName,
   mm2pt,
@@ -25,64 +23,25 @@ import {
   heightOfFontAtSize,
   getFontDescentInPt,
   getFontKitFont,
-  fetchRemoteFontData,
   widthOfTextAtSize,
-  splitTextToSize,
+  wrapTextToSize,
 } from './helper.js';
+import { getLineAlignment } from './wrap.js';
 import { stripInlineMarkdown } from './inlineMarkdown.js';
 import { applyTextLineRange } from './measure.js';
 import { calculateDynamicRichTextFontSize, isInlineMarkdownTextSchema } from './richText.js';
 import { renderInlineMarkdownText } from './richTextPdfRender.js';
 import { shouldUseDynamicFontSize } from './overflow.js';
-import { convertForPdfLayoutProps, rotatePoint, hex2PrintingColor } from '../utils.js';
+import {
+  convertForPdfLayoutProps,
+  rotatePoint,
+  hex2PrintingColor,
+  splitHexAlpha,
+  applyAlphaToOpacity,
+} from '../utils.js';
 import { getTextLineRange } from '../splitRange.js';
 import { getBoxContentArea, getBoxInsets, hasBoxDimension } from '../box.js';
-
-type PdfFontCache = Record<string, Promise<PDFFont>>;
-
-const PDF_FONT_CACHE_KEY = 'text-pdf-font-cache';
-
-const getPdfFontCache = (_cache: Map<string | number, unknown>): PdfFontCache => {
-  let pdfFontCache = _cache.get(PDF_FONT_CACHE_KEY) as PdfFontCache | undefined;
-  if (!pdfFontCache) {
-    pdfFontCache = {};
-    _cache.set(PDF_FONT_CACHE_KEY, pdfFontCache);
-  }
-
-  return pdfFontCache;
-};
-
-const embedAndGetFont = (arg: {
-  pdfDoc: PDFDocument;
-  font: Font;
-  fontName: string;
-  _cache: Map<string | number, unknown>;
-}) => {
-  const { pdfDoc, font, fontName, _cache } = arg;
-  const pdfFontCache = getPdfFontCache(_cache);
-  const cachedFont = pdfFontCache[fontName];
-  if (cachedFont) {
-    return cachedFont;
-  }
-
-  const fontValue = font[fontName];
-  if (!fontValue) {
-    return Promise.reject(new Error(`[@pdfme/schemas] Font "${fontName}" is not found.`));
-  }
-
-  const pdfFontPromise = (async () => {
-    let fontData = fontValue.data;
-    if (typeof fontData === 'string' && fontData.startsWith('http')) {
-      fontData = await fetchRemoteFontData(fontData);
-    }
-    return pdfDoc.embedFont(fontData, {
-      subset: typeof fontValue.subset === 'undefined' ? true : fontValue.subset,
-    });
-  })();
-
-  pdfFontCache[fontName] = pdfFontPromise;
-  return pdfFontPromise;
-};
+import { embedAndGetFont } from '../pdfFont.js';
 
 const getFontProp = ({
   value,
@@ -104,7 +63,10 @@ const getFontProp = ({
     (shouldUseDynamicFontSize(schema, basePdf)
       ? calculateDynamicFontSize({ textSchema: schema, fontKitFont, value })
       : (schema.fontSize ?? DEFAULT_FONT_SIZE));
-  const color = hex2PrintingColor(schema.fontColor || DEFAULT_FONT_COLOR, colorType);
+  const { color: fontColorHex, alpha: colorAlpha } = splitHexAlpha(
+    schema.fontColor || DEFAULT_FONT_COLOR,
+  );
+  const color = hex2PrintingColor(fontColorHex, colorType);
 
   return {
     alignment: schema.alignment ?? DEFAULT_ALIGNMENT,
@@ -113,14 +75,8 @@ const getFontProp = ({
     characterSpacing: schema.characterSpacing ?? DEFAULT_CHARACTER_SPACING,
     fontSize,
     color,
+    colorAlpha,
   };
-};
-
-let graphemeSegmenter: Intl.Segmenter | undefined;
-
-const getGraphemeSegmenter = () => {
-  graphemeSegmenter ??= new Intl.Segmenter(undefined, { granularity: 'grapheme' });
-  return graphemeSegmenter;
 };
 
 export const pdfRender = async (arg: PDFRenderProps<TextSchema>) => {
@@ -138,8 +94,8 @@ export const pdfRender = async (arg: PDFRenderProps<TextSchema>) => {
 
   const pivotPoint = { x: x + width / 2, y: pageHeight - mm2pt(schema.position.y) - height / 2 };
 
-  drawTextBoxDecoration({ page, schema, colorType, x, y, width, height, rotate, pivotPoint });
   if (!value) return;
+  drawTextBoxDecoration({ page, schema, colorType, x, y, width, height, rotate, pivotPoint });
 
   const fontName = schema.fontName ? schema.fontName : getFallbackFontName(font);
   const enableInlineMarkdown = isInlineMarkdownTextSchema(schema);
@@ -176,7 +132,16 @@ export const pdfRender = async (arg: PDFRenderProps<TextSchema>) => {
     fontSize: dynamicRichTextFontSize,
   });
 
-  const { fontSize, color, alignment, verticalAlignment, lineHeight, characterSpacing } = fontProp;
+  const {
+    fontSize,
+    color,
+    colorAlpha,
+    alignment,
+    verticalAlignment,
+    lineHeight,
+    characterSpacing,
+  } = fontProp;
+  const textOpacity = applyAlphaToOpacity(opacity, colorAlpha);
 
   if (enableInlineMarkdown) {
     await renderInlineMarkdownText({
@@ -203,6 +168,7 @@ export const pdfRender = async (arg: PDFRenderProps<TextSchema>) => {
       pivotPoint,
       rotate,
       opacity,
+      colorAlpha,
     });
     return;
   }
@@ -216,7 +182,7 @@ export const pdfRender = async (arg: PDFRenderProps<TextSchema>) => {
   const halfLineHeightAdjustment = lineHeight === 0 ? 0 : ((lineHeight - 1) * fontSize) / 2;
 
   const lines = applyTextLineRange(
-    splitTextToSize({
+    wrapTextToSize({
       value,
       characterSpacing,
       fontSize,
@@ -245,26 +211,22 @@ export const pdfRender = async (arg: PDFRenderProps<TextSchema>) => {
   }
 
   lines.forEach((line, rowIndex) => {
-    const trimmed = line.replace('\n', '');
+    const trimmed = line.text;
     const textWidth = needsTextWidth
       ? widthOfTextAtSize(trimmed, fontKitFont, fontSize, characterSpacing)
       : 0;
     const textHeight = needsTextHeight ? heightOfFontAtSize(fontKitFont, fontSize) : 0;
     const rowYOffset = lineHeight * fontSize * rowIndex;
+    const alignmentMetrics = getLineAlignment(
+      { text: trimmed, width: textWidth, hardBreak: line.hardBreak },
+      contentWidth,
+      alignment,
+    );
 
     // Adobe Acrobat Reader shows an error if `drawText` is called with an empty text
-    if (line === '') {
-      // return; // this also works
-      line = '\r\n';
-    }
+    const drawText = trimmed === '' ? '\r\n' : trimmed;
 
-    let xLine = contentX;
-    if (alignment === 'center') {
-      xLine += (contentWidth - textWidth) / 2;
-    } else if (alignment === 'right') {
-      xLine += contentWidth - textWidth;
-    }
-
+    let xLine = contentX + alignmentMetrics.x;
     let yLine = contentY + contentHeight - yOffset - rowYOffset;
 
     // draw strikethrough
@@ -276,7 +238,7 @@ export const pdfRender = async (arg: PDFRenderProps<TextSchema>) => {
         end: rotatePoint({ x: _x, y: _y }, pivotPoint, rotate.angle),
         thickness: (1 / 12) * fontSize,
         color: color,
-        opacity,
+        opacity: textOpacity,
       });
     }
 
@@ -289,7 +251,7 @@ export const pdfRender = async (arg: PDFRenderProps<TextSchema>) => {
         end: rotatePoint({ x: _x, y: _y }, pivotPoint, rotate.angle),
         thickness: (1 / 12) * fontSize,
         color: color,
-        opacity,
+        opacity: textOpacity,
       });
     }
 
@@ -301,17 +263,11 @@ export const pdfRender = async (arg: PDFRenderProps<TextSchema>) => {
       yLine = rotatedPoint.y;
     }
 
-    let spacing = characterSpacing;
-    if (alignment === 'justify' && line.slice(-1) !== '\n') {
-      // if alignment is `justify` but the end of line is not newline, then adjust the spacing
-      const segmenter = getGraphemeSegmenter();
-      const iterator = segmenter.segment(trimmed)[Symbol.iterator]();
-      const len = Array.from(iterator).length;
-      spacing += (contentWidth - textWidth) / len;
-    }
-    page.pushOperators(pdfLib.setCharacterSpacing(spacing));
+    page.pushOperators(
+      pdfLib.setCharacterSpacing(characterSpacing + alignmentMetrics.extraLetterSpacing),
+    );
 
-    page.drawText(trimmed, {
+    page.drawText(drawText, {
       x: xLine,
       y: yLine,
       rotate,
@@ -319,7 +275,7 @@ export const pdfRender = async (arg: PDFRenderProps<TextSchema>) => {
       color,
       lineHeight: lineHeight * fontSize,
       font: pdfFontValue,
-      opacity,
+      opacity: textOpacity,
     });
   });
 };
@@ -345,6 +301,7 @@ const drawTextBoxDecoration = (arg: {
     width: number;
     height: number;
     color: NonNullable<ReturnType<typeof hex2PrintingColor>>;
+    alpha: number;
   }) => {
     if (rect.width <= 0 || rect.height <= 0) return;
     const point =
@@ -358,18 +315,20 @@ const drawTextBoxDecoration = (arg: {
       height: rect.height,
       rotate,
       color: rect.color,
-      opacity,
+      opacity: opacity * rect.alpha,
     });
   };
 
   if (schema.backgroundColor) {
-    const color = hex2PrintingColor(schema.backgroundColor, colorType);
-    if (color) drawRectangle({ x, y, width, height, color });
+    const { color: bgHex, alpha } = splitHexAlpha(schema.backgroundColor);
+    const color = hex2PrintingColor(bgHex, colorType);
+    if (color) drawRectangle({ x, y, width, height, color, alpha });
   }
 
   if (!schema.borderColor || !hasBoxDimension(schema.borderWidth)) return;
 
-  const color = hex2PrintingColor(schema.borderColor, colorType);
+  const { color: borderHex, alpha } = splitHexAlpha(schema.borderColor);
+  const color = hex2PrintingColor(borderHex, colorType);
   if (!color) return;
 
   const top = mm2pt(borderWidth.top);
@@ -377,8 +336,8 @@ const drawTextBoxDecoration = (arg: {
   const bottom = mm2pt(borderWidth.bottom);
   const left = mm2pt(borderWidth.left);
 
-  drawRectangle({ x, y: y + height - top, width, height: top, color });
-  drawRectangle({ x: x + width - right, y, width: right, height, color });
-  drawRectangle({ x, y, width, height: bottom, color });
-  drawRectangle({ x, y, width: left, height, color });
+  drawRectangle({ x, y: y + height - top, width, height: top, color, alpha });
+  drawRectangle({ x: x + width - right, y, width: right, height, color, alpha });
+  drawRectangle({ x, y, width, height: bottom, color, alpha });
+  drawRectangle({ x, y, width: left, height, color, alpha });
 };

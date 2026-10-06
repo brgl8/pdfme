@@ -150,6 +150,63 @@ If the input data spans multiple pages, automatic page breaks will be inserted.
 
 ![Table with page breaks](/img/table-generated-pdf3.png)
 
+## Image columns
+
+A column can opt in to images. Columns without `cellType` stay text, and existing templates render the same way. `inputs` and `content` are still `string[][]`. An image cell's value is a PNG or JPEG data URL.
+
+```json
+{
+  "head": ["Name", "Photo", "Note"],
+  "headWidthPercentages": [30, 30, 40],
+  "columnStyles": {
+    "alignment": { "1": "center" },
+    "verticalAlignment": { "1": "middle" },
+    "cellType": { "1": "image" },
+    "imageHeightMode": { "1": "fixed" },
+    "imageHeight": { "1": 20 }
+  },
+  "content": "[[\"Alice\",\"data:image/png;base64,iVBORw0KGgo...\",\"Workshop\"]]"
+}
+```
+
+`imageHeightMode` and `imageHeight` are stored separately, so switching between `fixed` and `auto` does not clear the millimeter value.
+
+- `fixed` (the default) gives every cell in the column the same image height. That height is 20mm when `imageHeight` is omitted or is not a finite number greater than 0. Empty and invalid values keep that height, so the row does not collapse and page breaks stay predictable. 20mm also keeps a single default row from growing past one page.
+- `auto` sets the image height to `inner width × image height / image width`. An empty or invalid value contributes no image height, and the row follows the other cells. On a blank `basePdf`, the height is capped so the row, the header (when `showHead` is true), the cell's vertical padding and border, and a 1mm margin still fit in the page content box. A custom PDF `basePdf` is not reflowed, so that cap is not applied.
+
+Only `data:image/png;base64,...` and `data:image/jpeg;base64,...` (or `image/jpg`) are drawn. `http` URLs, gif, webp, svg, any other string, and broken base64 are not drawn. `null` is unsupported: it is not drawn and does not warn. `""` is the same. A PNG or JPEG whose header is readable but whose bytes fail during embedding is skipped, and the warning below is logged once. Any other invalid value logs this warning once per distinct value:
+
+```text
+[@pdfme/schemas/table] unsupported image in column N; only PNG/JPEG data URL is supported
+```
+
+Keep sample images small (about 100KB or less). The data URL is copied into the template or the inputs.
+
+Header cells are always text, even in an image column. A `cellType` of `null` is unsupported and is treated as text, without a warning. A column type this version does not know (for example a future `qrcode`) is treated as text, and that unknown value is warned about once.
+
+Older pdfme versions ignore `cellType` and show the data URL as text.
+
+### Choosing an image column
+
+Select the table in the Designer. The **Column Style** card has one block per column. The name is the heading, or "Column N" when the heading is empty. Each block sets the cell type, horizontal alignment, and vertical alignment. An image column also sets the height mode. With more than six columns, each block starts collapsed and the summary line shows the name, type, and alignments. Opening a block keeps it open across later edits of that table. Six columns or fewer stay expanded, with no collapse control.
+
+- **Text** is the default. An unknown type is shown as Text until you change it.
+- **Image** sets that column's `cellType` to `"image"` and clears every body cell in the column. The heading is not changed, and header cells stay text.
+- The first time a column becomes an image, pdfme writes `imageHeightMode: "fixed"` and `imageHeight: 20` when they are missing, and `alignment: "center"` only when alignment is missing. An alignment you already set is kept.
+- Switching the column back to Text removes that column's `cellType`, `imageHeightMode`, and `imageHeight`. Empty maps are removed. Alignment and vertical alignment are left as they are, and the body cells are cleared again.
+- Horizontal alignment writes only that column's `columnStyles.alignment`. Vertical alignment writes `columnStyles.verticalAlignment` the same way. Either value overrides the matching Head Style or Body Style for that column, including the header. A column with no value leaves the existing header and body alignment unchanged. Image cells use the same pair for `objectPosition`. Removing or renaming a column remaps `verticalAlignment` with the other per-column maps.
+
+An image column also has a height mode:
+
+- **Fixed height (mm)** uses one image height for every row. The field shows the stored height, or 20 when the stored value is missing or is not a finite number greater than 0. A value that is not a finite number greater than 0 is discarded and the field returns to the height it was showing.
+- **Auto (fit width)** sizes the image from its aspect ratio. Switching between fixed and auto changes only `imageHeightMode` and keeps the millimeter value.
+
+### Editing an image cell
+
+Click a body cell in an image column. In the Designer, and in the Form when the table is not read-only, that cell shows **Select image**. **Remove image** appears once the cell has a value and sets the cell to `""`. The file input accepts PNG and JPEG only. Clicking an empty image cell opens the file dialog; if the browser does not open it, use Select image. A resolved PNG or JPEG is shown in the cell. An empty or invalid value shows the dotted placeholder.
+
+Cells you are not editing stay as a picture, with no button and no file input. Header cells stay text. A read-only Form table and the Viewer do the same: the picture only, and the cursor is the default arrow. An editable image cell uses a pointer cursor.
+
 ## About Table Settings
 
 Using the Designer, you can easily set the number of columns and rows in a table. You can also freely configure the table's style.

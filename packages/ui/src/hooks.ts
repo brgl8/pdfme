@@ -32,6 +32,7 @@ import {
   getFitZoomLevel,
   getZoomAnchor,
   restoreZoomAnchor,
+  getStickyScrollPageIndex,
   type ZoomAnchor,
   type ZoomMode,
 } from './helper.js';
@@ -544,43 +545,6 @@ type ScrollPageCursorProps = {
   onChangePageCursor: (page: number) => void;
 };
 
-const getVisibleArea = (containerRect: DOMRect, elementRect: DOMRect) => {
-  const visibleWidth = Math.max(
-    0,
-    Math.min(containerRect.right, elementRect.right) -
-      Math.max(containerRect.left, elementRect.left),
-  );
-  const visibleHeight = Math.max(
-    0,
-    Math.min(containerRect.bottom, elementRect.bottom) -
-      Math.max(containerRect.top, elementRect.top),
-  );
-
-  return visibleWidth * visibleHeight;
-};
-
-const getMostVisiblePageIndex = (
-  container: HTMLElement,
-  paperRefs: MutableRefObject<HTMLDivElement[]>,
-  pageCursor: number,
-) => {
-  const containerRect = container.getBoundingClientRect();
-  let bestPageIndex = pageCursor;
-  let bestVisibleArea = 0;
-
-  paperRefs.current.forEach((paper, pageIndex) => {
-    if (!paper) return;
-
-    const visibleArea = getVisibleArea(containerRect, paper.getBoundingClientRect());
-    if (visibleArea > bestVisibleArea) {
-      bestVisibleArea = visibleArea;
-      bestPageIndex = pageIndex;
-    }
-  });
-
-  return bestVisibleArea > 0 ? bestPageIndex : pageCursor;
-};
-
 export const useScrollPageCursor = ({
   ref,
   paperRefs,
@@ -594,7 +558,7 @@ export const useScrollPageCursor = ({
       return;
     }
 
-    const _pageCursor = getMostVisiblePageIndex(ref.current, paperRefs, pageCursor);
+    const _pageCursor = getStickyScrollPageIndex(ref.current, paperRefs.current, pageCursor);
     if (_pageCursor !== pageCursor) {
       onChangePageCursor(_pageCursor);
     }
@@ -633,9 +597,8 @@ interface UseInitEventsParams {
   commitSchemas: (newSchemas: SchemaForUI[]) => void;
   removeSchemas: (ids: string[]) => void;
   onSaveTemplate: (t: Template) => void;
-  past: React.MutableRefObject<SchemaForUI[][]>;
-  future: React.MutableRefObject<SchemaForUI[][]>;
-  setSchemasList: React.Dispatch<React.SetStateAction<SchemaForUI[][]>>;
+  undo: () => void;
+  redo: () => void;
   onEdit: (targets: Array<HTMLElement | null | undefined>) => void;
   onEditEnd: () => void;
 }
@@ -650,9 +613,8 @@ export const useInitEvents = ({
   commitSchemas,
   removeSchemas,
   onSaveTemplate,
-  past,
-  future,
-  setSchemasList,
+  undo,
+  redo,
   onEdit,
   onEditEnd,
 }: UseInitEventsParams) => {
@@ -668,15 +630,6 @@ export const useInitEvents = ({
       const ids = activeElements.map((ae) => ae.id);
 
       return schemasList[pageCursor].filter((s) => ids.includes(s.id));
-    };
-    const timeTravel = (mode: 'undo' | 'redo') => {
-      const isUndo = mode === 'undo';
-      const stack = isUndo ? past : future;
-      if (stack.current.length <= 0) return;
-      (isUndo ? future : past).current.push(cloneDeep(schemasList[pageCursor]));
-      const s = cloneDeep(schemasList);
-      s[pageCursor] = stack.current.pop()!;
-      setSchemasList(s);
     };
     initShortCuts({
       move: (command, isShift) => {
@@ -728,12 +681,8 @@ export const useInitEvents = ({
             schema,
             stackUniqueSchemaNames,
           });
-          const { height, width, position: p } = cs;
-          const ps = pageSizes[pageCursor];
-          const position = {
-            x: p.x,
-            y: p.y,
-          };
+          // in place: same position as the copied schema (paste offsets it by 10 mm)
+          const position = { ...cs.position };
 
           return Object.assign(cloneDeep(cs), { id, name, position });
         });
@@ -743,8 +692,8 @@ export const useInitEvents = ({
         });
         copiedSchemas.current = pasteSchemas;
       },
-      redo: () => timeTravel('redo'),
-      undo: () => timeTravel('undo'),
+      redo: () => redo(),
+      undo: () => undo(),
       save: () =>
         onSaveTemplate && onSaveTemplate(schemasList2template(schemasList, template.basePdf)),
       remove: () => removeSchemas(getActiveSchemas().map((s) => s.id)),
@@ -761,9 +710,8 @@ export const useInitEvents = ({
     schemasList,
     onSaveTemplate,
     removeSchemas,
-    past,
-    future,
-    setSchemasList,
+    undo,
+    redo,
     copiedSchemas,
     onEdit,
     onEditEnd,

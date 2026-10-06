@@ -1,37 +1,96 @@
 import { PDFRenderProps } from '@pdfme/common';
-import { convertForPdfLayoutProps } from '../utils.js';
+import type { SvgColorMapper } from '@pdfme/pdf-lib';
+import { popGraphicsState, pushGraphicsState, rotateDegrees, translate } from '@pdfme/pdf-lib';
+import {
+  applyAlphaToOpacity,
+  convertForPdfLayoutProps,
+  hex2PrintingColor,
+  rgbColorToCmykColor,
+  splitHexAlpha,
+} from '../utils.js';
 import type { BarcodeSchema } from './types.js';
-import { createBarCode, validateBarcodeInput } from './helper.js';
-import { PDFImage } from '@pdfme/pdf-lib';
+import { createBarCodeSvg, ensureHexColorHash, validateBarcodeInput } from './helper.js';
 
 const getBarcodeCacheKey = (schema: BarcodeSchema, value: string) => {
-  return `${schema.type}${schema.backgroundColor}${schema.barColor}${schema.textColor}${value}${schema.includetext}`;
+  return `svg:${schema.type}:${schema.width}:${schema.height}:${schema.barColor}:${schema.textColor}:${schema.includetext}:${value}`;
+};
+
+const addSvgOpacity = (svg: string, opacity?: number) => {
+  return opacity === undefined ? svg : svg.replace(/<svg\b/, `<svg opacity="${opacity}"`);
+};
+
+const getSvgColorMapper = (colorType = ''): SvgColorMapper | undefined => {
+  return colorType.toLowerCase() === 'cmyk'
+    ? ({ parsed }) => ({
+        color: rgbColorToCmykColor(parsed.rgb),
+        alpha: parsed.alpha,
+      })
+    : undefined;
 };
 
 export const pdfRender = async (arg: PDFRenderProps<BarcodeSchema>) => {
-  const { value, schema, pdfDoc, page, _cache } = arg;
+  const { value, schema, page, options, _cache } = arg;
   if (!validateBarcodeInput(schema.type, value)) return;
 
   const inputBarcodeCacheKey = getBarcodeCacheKey(schema, value);
-  let image = _cache.get(inputBarcodeCacheKey) as PDFImage | undefined;
-  if (!image) {
-    const imageBuf = await createBarCode({
+  let svg = _cache.get(inputBarcodeCacheKey) as string | undefined;
+  if (!svg) {
+    svg = createBarCodeSvg({
       ...schema,
+      backgroundColor: undefined,
       type: schema.type,
       input: value,
     });
-    image = await pdfDoc.embedPng(imageBuf);
-    _cache.set(inputBarcodeCacheKey, image);
+    // Stretch to the schema box like the pre-SVG raster rendering did.
+    svg = svg.replace(/<svg\b/, '<svg preserveAspectRatio="none"');
+    _cache.set(inputBarcodeCacheKey, svg);
   }
 
   const pageHeight = page.getHeight();
   const {
     width,
     height,
-    rotate,
     position: { x, y },
     opacity,
-  } = convertForPdfLayoutProps({ schema, pageHeight });
+  } = convertForPdfLayoutProps({ schema, pageHeight, applyRotateTranslate: false });
 
-  page.drawImage(image, { x, y, rotate, width, height, opacity });
+  const pivot = { x: x + width / 2, y: y + height / 2 };
+  const rotate = schema.rotate ? -schema.rotate : 0;
+  if (rotate) {
+    page.pushOperators(
+      pushGraphicsState(),
+      translate(pivot.x, pivot.y),
+      rotateDegrees(rotate),
+      translate(-pivot.x, -pivot.y),
+    );
+  }
+
+  try {
+    const backgroundHex = ensureHexColorHash(schema.backgroundColor);
+    if (backgroundHex) {
+      const { color: backgroundColorHex, alpha } = splitHexAlpha(backgroundHex);
+      const backgroundColor =
+        alpha > 0 ? hex2PrintingColor(backgroundColorHex, options.colorType) : undefined;
+      if (backgroundColor) {
+        page.drawRectangle({
+          x,
+          y,
+          width,
+          height,
+          color: backgroundColor,
+          opacity: applyAlphaToOpacity(opacity, alpha),
+        });
+      }
+    }
+
+    await page.drawSvg(addSvgOpacity(svg, opacity), {
+      x,
+      y: y + height,
+      width,
+      height,
+      mapColor: getSvgColorMapper(options.colorType),
+    });
+  } finally {
+    if (rotate) page.pushOperators(popGraphicsState());
+  }
 };

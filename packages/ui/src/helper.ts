@@ -13,7 +13,12 @@ import {
   PluginRegistry,
 } from '@pdfme/common';
 import { pdf2size } from '@pdfme/converter';
-import { DEFAULT_MAX_ZOOM, PAGE_GAP, RULER_HEIGHT } from './constants.js';
+import {
+  DEFAULT_MAX_ZOOM,
+  PAGE_GAP,
+  PAGE_SWITCH_REMAINING_RATIO,
+  RULER_HEIGHT,
+} from './constants.js';
 import { OptionsContext } from './contexts.js';
 
 // Define a type for the hotkeys function with additional properties
@@ -46,6 +51,26 @@ export const uuid = () =>
     const r = (Math.random() * 16) | 0;
     const v = c == 'x' ? r : (r & 0x3) | 0x8;
     return v.toString(16);
+  });
+
+/**
+ * Assigns runtime UI ids that stay stable for a Designer/Viewer/Form session.
+ * Caller/template ids are ignored: Schema.passthrough() can carry values that
+ * break `#text-{id}` querySelector (e.g. `foo[`). Save paths still strip ids.
+ */
+export const stabilizeSchemaIds = <T extends { name: string; id?: string }>(
+  schemas: T[],
+  idMap: Map<string, string>,
+): (T & { id: string })[] =>
+  schemas.map((schema, index) => {
+    const key = schema.name || `index:${index}`;
+    const existingId = idMap.get(key);
+    if (existingId) {
+      return { ...schema, id: existingId };
+    }
+    const id = uuid();
+    idMap.set(key, id);
+    return { ...schema, id };
   });
 
 const set = <T extends object>(obj: T, path: string | string[], value: unknown) => {
@@ -88,6 +113,15 @@ export const round = (number: number, precision: number) => {
 
 export const flatten = <T>(arr: T[][]): T[] => ([] as T[]).concat(...arr);
 
+/**
+ * Single source of truth for whether a schema type supports rotation in the
+ * Designer (rotate handle on the canvas and rotate input in the detail view).
+ * A plugin opts out by omitting `rotate` from its propPanel.defaultSchema or
+ * setting it to `undefined` (e.g. `{ ...text.propPanel.defaultSchema, rotate: undefined }`).
+ */
+export const isRotatableSchema = (defaultSchema?: Record<string, unknown>): boolean =>
+  typeof defaultSchema?.rotate !== 'undefined';
+
 const up = 'up';
 const shiftUp = 'shift+up';
 const down = 'down';
@@ -106,6 +140,8 @@ const pasteWin = 'ctrl+v';
 const pasteMac = 'command+v';
 const pasteSpecialWin = 'ctrl+shift+v';
 const pasteSpecialMac = 'command+shift+v';
+// Letter shortcuts need hotkeys-js ≥4.0.4 (we declare ^4.0.7). 4.0.0–4.0.3
+// matched via physical event.code, so QWERTZ layouts swapped undo/redo (#1465).
 const redoWin = 'ctrl+y';
 const redoMac = 'shift+command+z';
 const undoWin = 'ctrl+z';
@@ -312,14 +348,7 @@ export const template2SchemasList = async (_template: Template) => {
     pageSizes = await pdf2size(pdfArrayBuffer);
   }
 
-  const ssl = schemasForUI.length;
-  const psl = pageSizes.length;
-
-  return (
-    ssl < psl
-      ? schemasForUI.concat(Array.from({ length: psl - ssl }, () => cloneDeep([])))
-      : schemasForUI.slice(0, pageSizes.length)
-  ).map((schema, i) => {
+  return alignSchemasListToPageCount(schemasForUI, pageSizes.length).map((schema, i) => {
     Object.values(schema).forEach((value) => {
       const { width, height } = pageSizes[i];
       const xEdge = value.position.x + value.width;
@@ -334,6 +363,36 @@ export const template2SchemasList = async (_template: Template) => {
 
     return schema;
   });
+};
+
+/**
+ * Pad or truncate schema pages so the list length matches `pageCount`.
+ * Empty pages are distinct arrays. This is the same alignment `template2SchemasList`
+ * uses when a base PDF's page count and the schema pages differ.
+ */
+export const alignSchemasListToPageCount = <T>(schemasList: T[][], pageCount: number): T[][] => {
+  if (schemasList.length === pageCount) return schemasList;
+  if (schemasList.length < pageCount) {
+    return schemasList.concat(
+      Array.from({ length: pageCount - schemasList.length }, () => [] as T[]),
+    );
+  }
+  return schemasList.slice(0, Math.max(pageCount, 0));
+};
+
+/**
+ * Fit a history snapshot to the pages of the current base PDF.
+ * Blank PDFs follow the snapshot length. A non-blank PDF keeps `pageSizes.length`,
+ * using the same pad/truncate as `template2SchemasList`. A zero page count means
+ * sizes are not loaded yet, so the snapshot is left unchanged.
+ */
+export const normalizeSchemasListForBasePdf = (
+  schemasList: SchemaForUI[][],
+  basePdf: BasePdf,
+  pageCount: number,
+): SchemaForUI[][] => {
+  if (isBlankPdf(basePdf) || pageCount <= 0) return schemasList;
+  return alignSchemasListToPageCount(schemasList, pageCount);
 };
 
 export const schemasList2template = (schemasList: SchemaForUI[][], basePdf: BasePdf): Template => ({
@@ -434,6 +493,71 @@ export const getPagesScrollTopByIndex = (pageSizes: Size[], index: number, scale
   return pageSizes
     .slice(0, index)
     .reduce((acc, cur) => acc + (cur.height * ZOOM + RULER_HEIGHT * scale) * scale, 0);
+};
+
+export const getVisibleOverlap = (containerRect: DOMRect, elementRect: DOMRect) => {
+  const width = Math.max(
+    0,
+    Math.min(containerRect.right, elementRect.right) -
+      Math.max(containerRect.left, elementRect.left),
+  );
+  const height = Math.max(
+    0,
+    Math.min(containerRect.bottom, elementRect.bottom) -
+      Math.max(containerRect.top, elementRect.top),
+  );
+
+  return { width, height, area: width * height };
+};
+
+const VERTICAL_SCROLL_EDGE_EPSILON = 1;
+
+const isAtVerticalScrollEdge = (container: HTMLElement) => {
+  const maxScrollTop = container.scrollHeight - container.clientHeight;
+  if (maxScrollTop <= 0) return false;
+
+  const { scrollTop } = container;
+  return (
+    scrollTop <= VERTICAL_SCROLL_EDGE_EPSILON ||
+    scrollTop >= maxScrollTop - VERTICAL_SCROLL_EDGE_EPSILON
+  );
+};
+
+export const getStickyScrollPageIndex = (
+  container: HTMLElement,
+  papers: Array<HTMLElement | null | undefined>,
+  pageCursor: number,
+) => {
+  const containerRect = container.getBoundingClientRect();
+  const stickyHeight = containerRect.height * PAGE_SWITCH_REMAINING_RATIO;
+
+  let bestPageIndex = pageCursor;
+  let bestVisibleArea = 0;
+  let currentVisibleHeight = 0;
+  let currentVisibleArea = 0;
+
+  papers.forEach((paper, pageIndex) => {
+    if (!paper) return;
+
+    const { height, area } = getVisibleOverlap(containerRect, paper.getBoundingClientRect());
+    if (pageIndex === pageCursor) {
+      currentVisibleHeight = height;
+      currentVisibleArea = area;
+    }
+    if (area > bestVisibleArea) {
+      bestVisibleArea = area;
+      bestPageIndex = pageIndex;
+    }
+  });
+
+  if (bestVisibleArea <= 0) return pageCursor;
+
+  const keepCurrentPage =
+    !isAtVerticalScrollEdge(container) &&
+    currentVisibleArea > 0 &&
+    currentVisibleHeight >= stickyHeight;
+
+  return keepCurrentPage ? pageCursor : bestPageIndex;
 };
 
 export type ZoomMode = 'manual' | 'fit-width' | 'fit-height';

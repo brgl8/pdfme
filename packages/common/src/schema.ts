@@ -1,6 +1,20 @@
 import { z } from 'zod';
 
-const langs = ['en', 'zh', 'ja', 'ko', 'ar', 'th', 'pl', 'it', 'de', 'es', 'fr'] as const;
+const langs = [
+  'en',
+  'zh',
+  'zh-TW',
+  'ja',
+  'ko',
+  'ar',
+  'th',
+  'tr',
+  'pl',
+  'it',
+  'de',
+  'es',
+  'fr',
+] as const;
 
 export const Lang = z.enum(langs);
 export const Dict = z.object({
@@ -59,6 +73,19 @@ export const Dict = z.object({
   'schemas.middle': z.string(),
   'schemas.bottom': z.string(),
   'schemas.padding': z.string(),
+  'schemas.image.objectFit': z.string(),
+  'schemas.image.fit.contain': z.string(),
+  'schemas.image.fit.cover': z.string(),
+  'schemas.image.objectPosition': z.string(),
+  'schemas.image.position.left.top': z.string(),
+  'schemas.image.position.center.top': z.string(),
+  'schemas.image.position.right.top': z.string(),
+  'schemas.image.position.left.center': z.string(),
+  'schemas.image.position.center.center': z.string(),
+  'schemas.image.position.right.center': z.string(),
+  'schemas.image.position.left.bottom': z.string(),
+  'schemas.image.position.center.bottom': z.string(),
+  'schemas.image.position.right.bottom': z.string(),
 
   'schemas.text.fontName': z.string(),
   'schemas.text.size': z.string(),
@@ -101,6 +128,14 @@ export const Dict = z.object({
   'schemas.table.headStyle': z.string(),
   'schemas.table.bodyStyle': z.string(),
   'schemas.table.columnStyle': z.string(),
+  'schemas.table.columnLabel': z.string(),
+  'schemas.table.cellType.text': z.string(),
+  'schemas.table.cellType.image': z.string(),
+  'schemas.table.imageHeightMode.fixed': z.string(),
+  'schemas.table.imageHeightMode.auto': z.string(),
+  'schemas.table.imageCell.select': z.string(),
+  'schemas.table.imageCell.remove': z.string(),
+  'schemas.table.imageCell.placeholder': z.string(),
 
   'schemas.date.format': z.string(),
   'schemas.date.locale': z.string(),
@@ -154,8 +189,20 @@ export const Schema = z
 const SchemaForUIAdditionalInfo = z.object({ id: z.string() });
 export const SchemaForUI = Schema.merge(SchemaForUIAdditionalInfo);
 
+/**
+ * PDF / font bytes with a definite ArrayBuffer backing store.
+ *
+ * Printed by name in declaration emit so published .d.ts stays valid on
+ * TypeScript ≤5.6, where Uint8Array is not generic. A generic typed-array
+ * annotation poisons `z.infer` unions such as `Template['basePdf']` on
+ * those compilers (see #1021).
+ */
+export interface PdfBytes extends Uint8Array {
+  readonly buffer: ArrayBuffer;
+}
+
 const ArrayBufferSchema: z.ZodSchema<ArrayBuffer> = z.any().refine((v) => v instanceof ArrayBuffer);
-const Uint8ArraySchema: z.ZodSchema<Uint8Array<ArrayBuffer>> = z
+const Uint8ArraySchema: z.ZodSchema<PdfBytes> = z
   .any()
   .refine((v) => v instanceof Uint8Array && v.buffer instanceof ArrayBuffer);
 

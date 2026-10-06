@@ -1,8 +1,8 @@
-import { Font, Fontkit, Glyph, Subset, TypeFeatures } from '../../types/fontkit';
+import { Font, Fontkit, Glyph, Subset, TypeFeatures } from '../../types/fontkit.js';
 
-import CustomFontEmbedder from './CustomFontEmbedder';
-import PDFHexString from '../objects/PDFHexString';
-import { Cache, mergeUint8Arrays, toHexStringOfMinLength } from '../../utils';
+import CustomFontEmbedder from './CustomFontEmbedder.js';
+import PDFHexString from '../objects/PDFHexString.js';
+import { Cache, mergeUint8Arrays, toHexStringOfMinLength } from '../../utils/index.js';
 
 /**
  * A note of thanks to the developers of https://github.com/foliojs/pdfkit, as
@@ -38,8 +38,12 @@ class CustomFontSubsetEmbedder extends CustomFontEmbedder {
     this.glyphIdMap = new Map();
   }
 
+  protected registerShapedGlyphs(_glyphs: Glyph[]): void {
+    // Subset embedder already tracks used glyphs via `includeGlyph`.
+  }
+
   encodeText(text: string): PDFHexString {
-    const { glyphs } = this.font.layout(text, this.fontFeatures);
+    const glyphs = this.layoutGlyphs(text);
     const hexCodes = Array(glyphs.length);
 
     for (let idx = 0, len = glyphs.length; idx < len; idx++) {

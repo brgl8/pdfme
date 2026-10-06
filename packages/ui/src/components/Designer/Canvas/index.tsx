@@ -18,13 +18,13 @@ import {
   ChangeSchemas,
   BasePdf,
   isBlankPdf,
-  replacePlaceholders,
+  resolveReadOnlyContent,
 } from '@pdfme/common';
 import { PluginsRegistry } from '../../../contexts.js';
 import { X } from 'lucide-react';
 import { RULER_HEIGHT, RIGHT_SIDEBAR_WIDTH, DESIGNER_CLASSNAME } from '../../../constants.js';
 import { usePrevious } from '../../../hooks.js';
-import { round, flatten, uuid } from '../../../helper.js';
+import { round, flatten, uuid, isRotatableSchema } from '../../../helper.js';
 import Paper from '../../Paper.js';
 import Renderer from '../../Renderer.js';
 import Selecto from './Selecto.js';
@@ -42,12 +42,20 @@ const fmt = (prop: string) => round(fmt4Num(prop) / ZOOM, 2);
 const isTopLeftResize = (d: string) => d === '-1,-1' || d === '-1,0' || d === '0,-1';
 const normalizeRotate = (angle: number) => ((angle % 360) + 360) % 360;
 
-const DeleteButton = ({ activeElements: aes }: { activeElements: HTMLElement[] }) => {
+const DeleteButton = ({
+  activeElements: aes,
+  controlScale,
+}: {
+  activeElements: HTMLElement[];
+  controlScale: number;
+}) => {
   const { token } = theme.useToken();
 
   const size = 26;
   const top = Math.min(...aes.map(({ style }) => fmt4Num(style.top)));
-  const left = Math.max(...aes.map(({ style }) => fmt4Num(style.left) + fmt4Num(style.width))) + 10;
+  const left =
+    Math.max(...aes.map(({ style }) => fmt4Num(style.left) + fmt4Num(style.width))) +
+    10 * controlScale;
 
   return (
     <Button
@@ -67,6 +75,8 @@ const DeleteButton = ({ activeElements: aes }: { activeElements: HTMLElement[] }
         borderRadius: token.borderRadius,
         color: token.colorWhite,
         background: token.colorPrimary,
+        transform: `scale(${controlScale})`,
+        transformOrigin: 'top left',
       }}
     >
       <X style={{ pointerEvents: 'none' }} />
@@ -97,6 +107,8 @@ interface Props {
   activeElements: HTMLElement[];
   onEdit: (targets: HTMLElement[]) => void;
   changeSchemas: ChangeSchemas;
+  /** Layout-only updates (renderer height sync). Does not record history. */
+  syncSchemas: ChangeSchemas;
   removeSchemas: (ids: string[]) => void;
   paperRefs: MutableRefObject<HTMLDivElement[]>;
   sidebarOpen: boolean;
@@ -116,6 +128,7 @@ const Canvas = (props: Props, ref: Ref<HTMLDivElement>) => {
     hoveringSchemaId,
     onEdit,
     changeSchemas,
+    syncSchemas,
     removeSchemas,
     onChangeHoveringSchemaId,
     paperRefs,
@@ -126,6 +139,7 @@ const Canvas = (props: Props, ref: Ref<HTMLDivElement>) => {
   const verticalGuides = useRef<GuidesInterface[]>([]);
   const horizontalGuides = useRef<GuidesInterface[]>([]);
   const moveable = useRef<MoveableComponent>(null);
+  const controlScale = scale > 0 ? 1 / scale : 1;
 
   const [isPressShiftKey, setIsPressShiftKey] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -252,15 +266,6 @@ const Canvas = (props: Props, ref: Ref<HTMLDivElement>) => {
       { key: 'width', value: fmt(width), schemaId: id },
       { key: 'height', value: fmt(height), schemaId: id },
     ]);
-
-    const targetSchema = schemasList[pageCursor].find((schema) => schema.id === id);
-
-    if (!targetSchema) return;
-
-    targetSchema.position.x = fmt(left);
-    targetSchema.position.y = fmt(top);
-    targetSchema.width = fmt(width);
-    targetSchema.height = fmt(height);
   };
 
   const onResizeEnds = ({ targets }: { targets: (HTMLElement | SVGElement)[] }) => {
@@ -348,10 +353,10 @@ const Canvas = (props: Props, ref: Ref<HTMLDivElement>) => {
       }
     });
 
-    // Check if all schema types have rotate property
+    // Check if all schema types support rotation
     return uniqueSchemaTypes.every((type) => {
       const matchingSchema = defaultSchemas.find((ds) => ds && 'type' in ds && ds.type === type);
-      return matchingSchema && 'rotate' in matchingSchema;
+      return isRotatableSchema(matchingSchema);
     });
   }, [activeElements, pageCursor, schemasList, pluginsRegistry]);
 
@@ -429,7 +434,7 @@ const Canvas = (props: Props, ref: Ref<HTMLDivElement>) => {
         renderPaper={({ index, paperSize }) => (
           <>
             {!editing && activeElements.length > 0 && pageCursor === index && (
-              <DeleteButton activeElements={activeElements} />
+              <DeleteButton activeElements={activeElements} controlScale={controlScale} />
             )}
             <Padding basePdf={basePdf} />
             <StaticSchema
@@ -460,6 +465,7 @@ const Canvas = (props: Props, ref: Ref<HTMLDivElement>) => {
                 <Moveable
                   ref={moveable}
                   target={activeElements}
+                  controlScale={controlScale}
                   bounds={{ left: 0, top: 0, bottom: paperSize.height, right: paperSize.width }}
                   horizontalGuidelines={getGuideLines(horizontalGuides.current, index)}
                   verticalGuidelines={getGuideLines(verticalGuides.current, index)}
@@ -489,7 +495,7 @@ const Canvas = (props: Props, ref: Ref<HTMLDivElement>) => {
           const content = schema.content || '';
           let value = content;
 
-          if (mode !== 'designer' && schema.readOnly) {
+          if (mode !== 'designer' && schema.readOnly && schema.type !== 'table') {
             const variables = {
               ...schemasList.flat().reduce(
                 (acc, currSchema) => {
@@ -502,7 +508,11 @@ const Canvas = (props: Props, ref: Ref<HTMLDivElement>) => {
               currentPage: index + 1,
             };
 
-            value = replacePlaceholders({ content, variables, schemas: schemasList });
+            value = resolveReadOnlyContent({
+              schema,
+              variables,
+              schemas: schemasList,
+            });
           }
 
           return (
@@ -519,9 +529,31 @@ const Canvas = (props: Props, ref: Ref<HTMLDivElement>) => {
                       // Use type assertion to safely handle the argument
                       type ChangeArg = { key: string; value: unknown };
                       const args = Array.isArray(arg) ? (arg as ChangeArg[]) : [arg as ChangeArg];
-                      changeSchemas(
-                        args.map(({ key, value }) => ({ key, value, schemaId: schema.id })),
-                      );
+                      const changes = args.map(({ key, value }) => ({
+                        key,
+                        value,
+                        schemaId: schema.id,
+                      }));
+                      // Table/List recompute height every render. That sync is not
+                      // a user edit: keep Moveable resize (width/position/height
+                      // together) on the history path, and round height the same
+                      // way Moveable's fmt() does so a follow-up sync is a no-op.
+                      if (
+                        changes.length > 0 &&
+                        changes.every((change) => change.key === 'height')
+                      ) {
+                        syncSchemas(
+                          changes.map((change) => ({
+                            ...change,
+                            value:
+                              typeof change.value === 'number' && Number.isFinite(change.value)
+                                ? round(change.value, 2)
+                                : change.value,
+                          })),
+                        );
+                        return;
+                      }
+                      changeSchemas(changes);
                     }
                   : undefined
               }

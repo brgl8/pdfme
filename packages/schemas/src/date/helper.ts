@@ -120,6 +120,11 @@ const LOCALE_MAP: Record<string, Locale> = {
   tr: { label: 'Turkish', adLocale: normalizeAdLocale(localeTr), formatLocale: dateFns.tr },
   uk: { label: 'Ukrainian', adLocale: normalizeAdLocale(localeUk), formatLocale: dateFns.uk },
   zh: { label: 'Chinese', adLocale: normalizeAdLocale(localeZh), formatLocale: dateFns.zhCN },
+  'zh-TW': {
+    label: 'Chinese (Traditional)',
+    adLocale: normalizeAdLocale(localeZh),
+    formatLocale: dateFns.zhTW,
+  },
 };
 
 export const getAirDatepickerLocale = (locale: string) => {
@@ -483,9 +488,6 @@ export const getPlugin = ({ type, icon }: { type: PickerType; icon: string }) =>
             title: i18n('schemas.textColor'),
             type: 'string',
             widget: 'color',
-            props: {
-              disabledAlpha: true,
-            },
             rules: [
               {
                 pattern: HEX_COLOR_PATTERN,
@@ -497,9 +499,6 @@ export const getPlugin = ({ type, icon }: { type: PickerType; icon: string }) =>
             title: i18n('schemas.bgColor'),
             type: 'string',
             widget: 'color',
-            props: {
-              disabledAlpha: true,
-            },
             rules: [
               {
                 pattern: HEX_COLOR_PATTERN,
