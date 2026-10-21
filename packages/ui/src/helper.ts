@@ -10,6 +10,7 @@ import {
   SchemaForUI,
   Size,
   isBlankPdf,
+  Plugin,
   PluginRegistry,
 } from '@pdfme/common';
 import { pdf2size } from '@pdfme/converter';
@@ -24,7 +25,6 @@ import { OptionsContext } from './contexts.js';
 // Define a type for the hotkeys function with additional properties
 type HotkeysFunction = {
   (keys: string, callback: (e: KeyboardEvent, handler: { shortcut: string }) => void): unknown;
-  shift: boolean;
   unbind: (keys: string) => void;
 };
 
@@ -36,8 +36,6 @@ const hotkeys = function (
   return hotkeysJs(keys, callback);
 } as HotkeysFunction;
 
-// Add properties to the hotkeys function
-hotkeys.shift = false;
 hotkeys.unbind = function (keys: string) {
   // Do nothing if hotkeysJs doesn't have unbind
   const hotkeysFn = hotkeysJs as unknown as { unbind?: (keys: string) => void };
@@ -122,6 +120,10 @@ export const flatten = <T>(arr: T[][]): T[] => ([] as T[]).concat(...arr);
 export const isRotatableSchema = (defaultSchema?: Record<string, unknown>): boolean =>
   typeof defaultSchema?.rotate !== 'undefined';
 
+/** Plugins with an intrinsic aspect ratio keep their box ratio on canvas resize without Shift. */
+export const isAspectRatioLockedPlugin = (plugin?: Plugin): boolean =>
+  typeof plugin?.getAspectRatio === 'function';
+
 const up = 'up';
 const shiftUp = 'shift+up';
 const down = 'down';
@@ -196,22 +198,22 @@ export const initShortCuts = (arg: {
       case up:
       case shiftUp:
         e.preventDefault();
-        arg.move('up', hotkeys.shift);
+        arg.move('up', e.shiftKey);
         break;
       case down:
       case shiftDown:
         e.preventDefault();
-        arg.move('down', hotkeys.shift);
+        arg.move('down', e.shiftKey);
         break;
       case left:
       case shiftLeft:
         e.preventDefault();
-        arg.move('left', hotkeys.shift);
+        arg.move('left', e.shiftKey);
         break;
       case right:
       case shiftRight:
         e.preventDefault();
-        arg.move('right', hotkeys.shift);
+        arg.move('right', e.shiftKey);
         break;
       case rmWin:
       case rmMac:
@@ -714,6 +716,40 @@ const handleTypeChange = (
   }
 };
 
+const ASPECT_RATIO_TRIGGER_KEYS = new Set(['width', 'height', 'content', 'type']);
+
+/**
+ * Snap the box to the plugin's intrinsic ratio. A height-only edit derives the width;
+ * every other trigger (width, both sides from a canvas resize, content, type) derives
+ * the height. If the page bounds clamp the derived side, the edited side shrinks to match.
+ */
+const applyAspectRatio = (
+  schema: SchemaForUI,
+  changedKeys: Set<string>,
+  pluginsRegistry: PluginRegistry,
+  basePdf: BasePdf,
+  pageSize: Size,
+) => {
+  if (![...changedKeys].some((key) => ASPECT_RATIO_TRIGGER_KEYS.has(key))) return;
+  const ratio = pluginsRegistry.findByType(schema.type)?.getAspectRatio?.(schema);
+  if (!ratio || !Number.isFinite(ratio) || ratio <= 0) return;
+
+  const fromHeight = changedKeys.has('height') && !changedKeys.has('width');
+  const [edited, derived] = fromHeight
+    ? (['height', 'width'] as const)
+    : (['width', 'height'] as const);
+  const deriveFrom = (key: 'width' | 'height') =>
+    round(key === 'width' ? schema.width / ratio : schema.height * ratio, 2);
+
+  const target = deriveFrom(edited);
+  handlePositionSizeChange(schema, derived, target, basePdf, pageSize);
+  // Re-derive the edited side only when bounds clamped the derived one; otherwise
+  // rounding would alter the value the user just typed.
+  if (schema[derived] !== target) {
+    handlePositionSizeChange(schema, edited, deriveFrom(derived), basePdf, pageSize);
+  }
+};
+
 export const changeSchemas = (args: {
   objs: { key: string; value: unknown; schemaId: string }[];
   schemas: SchemaForUI[];
@@ -723,6 +759,7 @@ export const changeSchemas = (args: {
   commitSchemas: (newSchemas: SchemaForUI[]) => void;
 }) => {
   const { objs, schemas, basePdf, pluginsRegistry, pageSize, commitSchemas } = args;
+  const changedKeysById = new Map<string, Set<string>>();
   const newSchemas = objs.reduce((acc, { key, value, schemaId }) => {
     const tgt = acc.find((s) => s.id === schemaId);
     if (!tgt) return acc;
@@ -735,8 +772,17 @@ export const changeSchemas = (args: {
       handlePositionSizeChange(tgt, key, value, basePdf, pageSize);
     }
 
+    const changedKeys = changedKeysById.get(schemaId) ?? new Set<string>();
+    changedKeys.add(key);
+    changedKeysById.set(schemaId, changedKeys);
+
     return acc;
   }, cloneDeep(schemas));
+
+  for (const schema of newSchemas) {
+    const changedKeys = changedKeysById.get(schema.id);
+    if (changedKeys) applyAspectRatio(schema, changedKeys, pluginsRegistry, basePdf, pageSize);
+  }
   commitSchemas(newSchemas);
 };
 

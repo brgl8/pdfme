@@ -452,6 +452,18 @@ async function generateAndComparePDF(page: Page, browser: Browser, labelPrefix: 
   }
 }
 
+async function blockThirdPartyRequests(page: Page) {
+  const ignoreDomains = ['https://media.ethicalads.io/', 'https://img.shields.io/'];
+  await page.setRequestInterception(true);
+  page.on('request', (req) => {
+    if (ignoreDomains.some((d) => req.url().startsWith(d))) {
+      req.abort();
+    } else {
+      req.continue();
+    }
+  });
+}
+
 describe('Playground E2E Tests', () => {
   let browser: Browser | undefined;
   let page: Page | undefined;
@@ -490,18 +502,9 @@ describe('Playground E2E Tests', () => {
         document.head.appendChild(style);
       });
     });
-    await page.setRequestInterception(true);
+    await blockThirdPartyRequests(page);
     await page.setViewport(viewport);
     page.setDefaultNavigationTimeout(timeout);
-
-    page.on('request', (req) => {
-      const ignoreDomains = ['https://media.ethicalads.io/'];
-      if (ignoreDomains.some((d) => req.url().startsWith(d))) {
-        req.abort();
-      } else {
-        req.continue();
-      }
-    });
   });
 
   afterAll(async () => {
@@ -604,5 +607,162 @@ describe('Playground E2E Tests', () => {
     await waitForFormReady(page, 'Filled by CI');
 
     await generateAndComparePDF(page, browser, 'final-form');
+  });
+
+  it('should render the Designer property panel with the Designer theme', async () => {
+    if (!page) throw new Error('Browser/Page not initialized');
+
+    await loadRouteWithStorage(page, '/designer', { template: buildModifiedTemplate() });
+    await waitForDesignerReady(page, 'Type Something...');
+
+    const fieldName = modifiedTemplateFieldNames.text;
+    await page.evaluate((name) => {
+      const label = [...document.querySelectorAll('span')].find(
+        (el) => el.textContent?.trim() === name,
+      );
+      if (!label) throw new Error(`Field "${name}" not found in the field list`);
+      label.click();
+    }, fieldName);
+
+    const checkedCheckbox = '.fr-form .ant-checkbox-checked';
+    await page.waitForSelector(checkedCheckbox, { timeout });
+    const checkboxColor = await page.$eval(
+      checkedCheckbox,
+      (el) => getComputedStyle(el).backgroundColor,
+    );
+
+    // The playground Designer sets theme.token.colorPrimary to #25c2a0.
+    expect(checkboxColor).toBe('rgb(37, 194, 160)');
+
+    const panelStyles = await page.evaluate(() => {
+      const form = document.querySelector('.fr-form');
+      if (!form) throw new Error('Property panel form not found');
+      const style = (el: Element | null | undefined, pseudo?: string) => {
+        if (!el) throw new Error('Property panel element not found');
+        return getComputedStyle(el, pseudo);
+      };
+      const headerTitle = [...form.querySelectorAll('*')].find(
+        (el) => el.childElementCount === 0 && el.textContent?.trim() === 'Border Width',
+      );
+      let headerLine = headerTitle?.parentElement;
+      while (headerLine && parseFloat(style(headerLine).borderBottomWidth) === 0) {
+        headerLine = headerLine.parentElement;
+      }
+      const emptyInput = [...form.querySelectorAll<HTMLInputElement>('input[placeholder]')].find(
+        (input) => !input.value,
+      );
+      return {
+        inputBorder: style(form.querySelector('.ant-input-number')).borderTopColor,
+        placeholder: style(emptyInput, '::placeholder').color,
+        headerTitleColor: style(headerTitle).color,
+        headerTitleIsThemed: !!headerTitle?.closest('.ant-typography'),
+        formLabelColor: style(form.querySelector('.ant-form-item-label > label')).color,
+        headerLine: style(headerLine).borderBottomColor,
+        dividerLine: style(document.querySelector('.ant-divider')).borderTopColor,
+      };
+    });
+
+    // Light theme tokens resolved by @pdfme/ui (packages/ui/src/theme.ts).
+    expect(panelStyles.inputBorder).toBe('rgb(142, 142, 142)');
+    expect(panelStyles.placeholder).toBe('rgba(0, 0, 0, 0.65)');
+    // Section headers ("Border Width") use the theme text color and the
+    // panel divider line instead of form-render's hardcoded CSS.
+    expect(panelStyles.headerLine).toBe(panelStyles.dividerLine);
+    expect(panelStyles.headerTitleIsThemed).toBe(true);
+    expect(panelStyles.headerTitleColor).toBe(panelStyles.formLabelColor);
+  });
+
+  it('should keep the header and menus usable on a mobile viewport', async () => {
+    if (!browser) throw new Error('Browser not initialized');
+
+    const mobilePage = await browser.newPage();
+    try {
+      await blockThirdPartyRequests(mobilePage);
+      await mobilePage.setViewport({ width: 390, height: 844, isMobile: true, hasTouch: true });
+      await mobilePage.goto(`${baseUrl}/designer?template=invoice`, {
+        waitUntil: 'networkidle2',
+        timeout,
+      });
+      await waitForDesignerReady(mobilePage, 'INVOICE');
+
+      const layout = await mobilePage.evaluate(() => {
+        const header = document.querySelector('header')!.getBoundingClientRect();
+        const canvas = document.querySelector('.pdfme-designer-canvas')!.getBoundingClientRect();
+        const headerHit = document.elementFromPoint(header.width / 2, header.height / 2);
+        return {
+          scrollWidth: document.documentElement.scrollWidth,
+          scrollHeight: document.documentElement.scrollHeight,
+          headerBottom: header.bottom,
+          canvasTop: canvas.top,
+          headerOnTop: document.querySelector('header')!.contains(headerHit),
+          desktopTabsVisible: document.querySelector('#designer-nav')!.checkVisibility(),
+          actionsInHeader: !!document.querySelector('header #page-actions-button'),
+        };
+      });
+      expect(layout.scrollWidth).toBe(390);
+      expect(layout.scrollHeight).toBe(844);
+      expect(layout.canvasTop).toBeGreaterThanOrEqual(layout.headerBottom);
+      expect(layout.headerOnTop).toBe(true);
+      expect(layout.desktopTabsVisible).toBe(false);
+      expect(layout.actionsInHeader).toBe(true);
+
+      await mobilePage.click('#site-menu-button');
+      const menu = await mobilePage.evaluate(() => {
+        const button = document.querySelector('#site-menu-button')!;
+        const panel = document.getElementById(button.getAttribute('aria-controls') ?? '');
+        const formViewerLink = [...(panel?.querySelectorAll('a') ?? [])].find(
+          (link) => link.textContent?.trim() === 'Form/Viewer',
+        );
+        return {
+          expanded: button.getAttribute('aria-expanded'),
+          focusInPanel: !!panel?.contains(document.activeElement),
+          hasFormViewerLink: !!formViewerLink?.checkVisibility(),
+          current: panel?.querySelector('[aria-current="page"]')?.textContent?.trim(),
+        };
+      });
+      expect(menu).toEqual({
+        expanded: 'true',
+        focusInPanel: true,
+        hasFormViewerLink: true,
+        current: 'Designer',
+      });
+
+      await mobilePage.keyboard.press('Escape');
+      const afterEscape = await mobilePage.evaluate(() => {
+        const button = document.querySelector('#site-menu-button')!;
+        return {
+          expanded: button.getAttribute('aria-expanded'),
+          focusOnButton: document.activeElement === button,
+        };
+      });
+      expect(afterEscape).toEqual({ expanded: 'false', focusOnButton: true });
+
+      await mobilePage.click('#site-menu-button');
+      await mobilePage.evaluate(() => {
+        const button = document.querySelector('#site-menu-button')!;
+        const panel = document.getElementById(button.getAttribute('aria-controls') ?? '');
+        const link = [...(panel?.querySelectorAll('a') ?? [])].find(
+          (a) => a.textContent?.trim() === 'Form/Viewer',
+        );
+        (link as HTMLAnchorElement).click();
+      });
+      await mobilePage.waitForFunction(() => location.pathname === '/form-viewer', { timeout });
+      await waitForFormReady(mobilePage);
+      const afterNavigation = await mobilePage.evaluate(() => {
+        const button = document.querySelector('#site-menu-button')!;
+        return {
+          expanded: button.getAttribute('aria-expanded'),
+          focusOnButton: document.activeElement === button,
+          headerHeight: document.querySelector('header')!.getBoundingClientRect().height,
+        };
+      });
+      expect(afterNavigation).toEqual({
+        expanded: 'false',
+        focusOnButton: true,
+        headerHeight: layout.headerBottom,
+      });
+    } finally {
+      await mobilePage.close();
+    }
   });
 });

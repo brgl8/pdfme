@@ -20,11 +20,17 @@ import {
   isBlankPdf,
   resolveReadOnlyContent,
 } from '@pdfme/common';
-import { PluginsRegistry } from '../../../contexts.js';
+import { OptionsContext, PluginsRegistry } from '../../../contexts.js';
 import { X } from 'lucide-react';
 import { RULER_HEIGHT, RIGHT_SIDEBAR_WIDTH, DESIGNER_CLASSNAME } from '../../../constants.js';
 import { usePrevious } from '../../../hooks.js';
-import { round, flatten, uuid, isRotatableSchema } from '../../../helper.js';
+import {
+  round,
+  flatten,
+  uuid,
+  isRotatableSchema,
+  isAspectRatioLockedPlugin,
+} from '../../../helper.js';
 import Paper from '../../Paper.js';
 import Renderer from '../../Renderer.js';
 import Selecto from './Selecto.js';
@@ -136,6 +142,7 @@ const Canvas = (props: Props, ref: Ref<HTMLDivElement>) => {
   } = props;
   const { token } = theme.useToken();
   const pluginsRegistry = useContext(PluginsRegistry);
+  const options = useContext(OptionsContext);
   const verticalGuides = useRef<GuidesInterface[]>([]);
   const horizontalGuides = useRef<GuidesInterface[]>([]);
   const moveable = useRef<MoveableComponent>(null);
@@ -360,13 +367,23 @@ const Canvas = (props: Props, ref: Ref<HTMLDivElement>) => {
     });
   }, [activeElements, pageCursor, schemasList, pluginsRegistry]);
 
+  const keepRatio = useMemo(() => {
+    if (isPressShiftKey) return true;
+    const ids = activeElements.map((ae) => ae.id);
+    const selected = (schemasList[pageCursor] || []).filter((s) => ids.includes(s.id));
+    return (
+      selected.length > 0 &&
+      selected.every((s) => isAspectRatioLockedPlugin(pluginsRegistry.findByType(s.type)))
+    );
+  }, [isPressShiftKey, activeElements, pageCursor, schemasList, pluginsRegistry]);
+
   return (
     <div
       className={DESIGNER_CLASSNAME + 'canvas'}
       style={{
         position: 'relative',
         overflow: 'auto',
-        marginRight: sidebarOpen ? RIGHT_SIDEBAR_WIDTH : 0,
+        marginRight: sidebarOpen ? (options.rightSidebarWidth ?? RIGHT_SIDEBAR_WIDTH) : 0,
         ...size,
       }}
       ref={ref}
@@ -469,7 +486,7 @@ const Canvas = (props: Props, ref: Ref<HTMLDivElement>) => {
                   bounds={{ left: 0, top: 0, bottom: paperSize.height, right: paperSize.width }}
                   horizontalGuidelines={getGuideLines(horizontalGuides.current, index)}
                   verticalGuidelines={getGuideLines(verticalGuides.current, index)}
-                  keepRatio={isPressShiftKey}
+                  keepRatio={keepRatio}
                   rotatable={rotatable}
                   onDrag={onDrag}
                   onDragEnd={onDragEnd}
@@ -486,7 +503,7 @@ const Canvas = (props: Props, ref: Ref<HTMLDivElement>) => {
             )}
           </>
         )}
-        renderSchema={({ schema, index }) => {
+        renderSchema={({ schema, pageIndex }) => {
           const mode =
             editing && activeElements.map((ae) => ae.id).includes(schema.id)
               ? 'designer'
@@ -505,7 +522,7 @@ const Canvas = (props: Props, ref: Ref<HTMLDivElement>) => {
                 {} as Record<string, string>,
               ),
               totalPages: schemasList.length,
-              currentPage: index + 1,
+              currentPage: pageIndex + 1,
             };
 
             value = resolveReadOnlyContent({

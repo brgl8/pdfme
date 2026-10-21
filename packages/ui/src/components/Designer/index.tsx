@@ -4,6 +4,7 @@ import React, {
   useContext,
   useCallback,
   useEffect,
+  useEffectEvent,
   useLayoutEffect,
   useMemo,
 } from 'react';
@@ -38,6 +39,7 @@ import {
 import { useUIPreProcessor, useScrollPageCursor, useInitEvents, useZoom } from '../../hooks.js';
 import {
   createDesignerSelection,
+  EMPTY_DESIGNER_SELECTION,
   getDesignerSelectionPageIndex,
   getSelectedSchemaIds,
   normalizeDesignerSchemaSelectionTargets,
@@ -57,7 +59,11 @@ type TemplateEditorProps = Omit<DesignerProps, 'domContainer'> & {
   onUpdateTemplatePageApplied?: (page: number) => void;
   onPageCursorChange: (newPageCursor: number, totalPages: number) => void;
   updateTemplatePage?: number;
+  /** Applied once per new reference, overriding the user's sidebar toggle. */
+  sidebarOpenRequest?: SidebarOpenRequest;
 };
+
+export type SidebarOpenRequest = { open: boolean };
 
 type PendingScrollPage = {
   page: number;
@@ -133,6 +139,7 @@ const TemplateEditor = ({
   onRegisterSchemaSelectionHandler,
   onUpdateTemplatePageApplied,
   updateTemplatePage,
+  sidebarOpenRequest,
 }: TemplateEditorProps) => {
   const past = useRef<DesignerHistoryEntry[]>([]);
   const future = useRef<DesignerHistoryEntry[]>([]);
@@ -150,7 +157,9 @@ const TemplateEditor = ({
   const options = useContext(OptionsContext);
   const maxZoom = useMaxZoom();
 
-  const canvasWidth = size.width - LEFT_SIDEBAR_WIDTH;
+  const leftSidebarWidth = options.leftSidebarWidth ?? LEFT_SIDEBAR_WIDTH;
+  const rightSidebarWidth = options.rightSidebarWidth ?? RIGHT_SIDEBAR_WIDTH;
+  const canvasWidth = Math.max(size.width - leftSidebarWidth, 0);
 
   const [hoveringSchemaId, setHoveringSchemaId] = useState<string | null>(null);
   const [activeElements, setActiveElements] = useState<HTMLElement[]>([]);
@@ -164,24 +173,32 @@ const TemplateEditor = ({
   // Close the sidebar by default on narrow viewports (e.g. smartphones) where
   // it would not leave any usable canvas width.
   const [sidebarOpen, setSidebarOpen] = useState(
-    options.sidebarOpen ?? canvasWidth - RIGHT_SIDEBAR_WIDTH >= MIN_CANVAS_WIDTH,
+    options.sidebarOpen ?? canvasWidth - rightSidebarWidth >= MIN_CANVAS_WIDTH,
   );
+  const [appliedSidebarOpenRequest, setAppliedSidebarOpenRequest] = useState(sidebarOpenRequest);
+  if (sidebarOpenRequest !== appliedSidebarOpenRequest) {
+    setAppliedSidebarOpenRequest(sidebarOpenRequest);
+    if (sidebarOpenRequest) setSidebarOpen(sidebarOpenRequest.open);
+  }
   const [canvasHeight, setCanvasHeight] = useState(0);
   const [prevTemplate, setPrevTemplate] = useState<Template | null>(null);
+  // Page backgrounds and sizes follow the edited document, not the loaded
+  // `template`, which keeps its page count until the host loads another one.
+  const [pageSource, setPageSource] = useState(template);
 
   const sizeExcSidebars = useMemo(
     () => ({
       // Never let the width go negative; on narrow viewports the open sidebar
       // can be wider than the screen, which previously produced a negative
       // base scale and left the Designer stuck on the loading spinner.
-      width: Math.max(sidebarOpen ? canvasWidth - RIGHT_SIDEBAR_WIDTH : canvasWidth, 0),
+      width: Math.max(sidebarOpen ? canvasWidth - rightSidebarWidth : canvasWidth, 0),
       height: size.height,
     }),
-    [canvasWidth, sidebarOpen, size.height],
+    [canvasWidth, rightSidebarWidth, sidebarOpen, size.height],
   );
 
-  const { backgrounds, pageSizes, baseScale, error, refresh } = useUIPreProcessor({
-    template,
+  const { backgrounds, pageSizes, baseScale, error } = useUIPreProcessor({
+    template: pageSource,
     size: sizeExcSidebars,
     zoomLevel: 1,
     maxZoom,
@@ -258,15 +275,25 @@ const TemplateEditor = ({
     return () => onRegisterSchemaSelectionHandler?.(null);
   }, [onRegisterSchemaSelectionHandler, selectSchemas]);
 
+  const notifySelectionChange = useEffectEvent((selection: DesignerSelection) => {
+    onChangeSelection?.(selection);
+  });
+  const lastSelectionKeyRef = useRef(JSON.stringify(EMPTY_DESIGNER_SELECTION));
+
+  // Notify only when the selection payload changes. Re-renders recreate
+  // `schemasList` and callbacks, and hosts may call updateOptions from the
+  // callback, so emitting on reference changes would loop.
   useEffect(() => {
-    onChangeSelection?.(
-      createDesignerSelection({
-        activeSchemaIds: activeElements.map((element) => element.id),
-        pageIndex: pageCursor,
-        schemasList,
-      }),
-    );
-  }, [activeElements, onChangeSelection, pageCursor, schemasList]);
+    const selection = createDesignerSelection({
+      activeSchemaIds: activeElements.map((element) => element.id),
+      pageIndex: pageCursor,
+      schemasList,
+    });
+    const selectionKey = JSON.stringify(selection);
+    if (selectionKey === lastSelectionKeyRef.current) return;
+    lastSelectionKeyRef.current = selectionKey;
+    notifySelectionChange(selection);
+  }, [activeElements, pageCursor, schemasList]);
 
   const onEditEnd = () => {
     setActiveElements([]);
@@ -300,12 +327,6 @@ const TemplateEditor = ({
       setZoomLevel(options.zoomLevel);
     }
   }, [options.zoomLevel, setZoomLevel]);
-
-  useEffect(() => {
-    if (typeof options.sidebarOpen === 'boolean') {
-      setSidebarOpen(options.sidebarOpen);
-    }
-  }, [options.sidebarOpen]);
 
   const armScrollSuppression = (fallbackMs?: number) => {
     const token = ++scrollSuppressTokenRef.current;
@@ -433,7 +454,7 @@ const TemplateEditor = ({
         onPageCursorChange(clampedCursor, next.length);
       }
       if (pageCountChanged) {
-        void refresh(newTemplate);
+        setPageSource(newTemplate);
       }
 
       if (cursorChanged) {
@@ -450,7 +471,7 @@ const TemplateEditor = ({
         }
       }
     },
-    [displayScale, onChangeTemplate, onPageCursorChange, pageSizes, refresh, template.basePdf],
+    [displayScale, onChangeTemplate, onPageCursorChange, pageSizes, template.basePdf],
   );
 
   const commitSchemas = useCallback(
@@ -691,6 +712,7 @@ const TemplateEditor = ({
 
   if (prevTemplate !== template) {
     setPrevTemplate(template);
+    setPageSource(template);
     void updateTemplate(template, updateTemplatePage);
   }
 
@@ -736,7 +758,7 @@ const TemplateEditor = ({
           style={{
             position: 'absolute',
             width: canvasWidth,
-            marginLeft: LEFT_SIDEBAR_WIDTH,
+            marginLeft: leftSidebarWidth,
           }}
         >
           <CtlBar

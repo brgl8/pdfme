@@ -27,7 +27,7 @@ import {
   mockClientSizeFromStyle,
   setupUIMock,
 } from '../assets/helper';
-import { text, image, multiVariableText, table } from '@pdfme/schemas';
+import { text, image, multiVariableText, table, barcodes } from '@pdfme/schemas';
 import { emitFormWatch, useForm } from 'form-render';
 import * as uiHelper from '../../src/helper';
 
@@ -453,6 +453,59 @@ test('Designer keeps sidebar toggle interactive when options.sidebarOpen is only
   });
 });
 
+test.each([
+  { viewportWidth: 1200, leftWidth: 100, rightWidth: 450, initiallyOpen: true },
+  { viewportWidth: 600, leftWidth: 100, rightWidth: 450, initiallyOpen: false },
+  { viewportWidth: 320, leftWidth: 400, rightWidth: 450, initiallyOpen: false },
+])('Designer respects custom sidebar widths at $viewportWidth px', async ({
+  viewportWidth,
+  leftWidth,
+  rightWidth,
+  initiallyOpen,
+}) => {
+  setupUIMock();
+  const { container } = render(
+    <I18nContext.Provider value={i18n}>
+      <FontContext.Provider value={getDefaultFont()}>
+        <PluginsRegistry.Provider value={pluginRegistry(plugins)}>
+          <OptionsContext.Provider
+            value={{ leftSidebarWidth: leftWidth, rightSidebarWidth: rightWidth }}
+          >
+            <Designer
+              template={getSampleTemplate()}
+              onSaveTemplate={vi.fn()}
+              onChangeTemplate={vi.fn()}
+              size={{ width: viewportWidth, height: 1200 }}
+              onPageCursorChange={vi.fn()}
+            />
+          </OptionsContext.Provider>
+        </PluginsRegistry.Provider>
+      </FontContext.Provider>
+    </I18nContext.Provider>,
+  );
+  const leftSidebar = container.querySelector(`.${DESIGNER_CLASSNAME}left-sidebar`) as HTMLElement;
+  const rightSidebar = container.querySelector(`.${DESIGNER_CLASSNAME}right-sidebar`) as HTMLElement;
+  const canvas = container.querySelector(`.${DESIGNER_CLASSNAME}canvas`) as HTMLElement;
+  const canvasContainer = canvas.parentElement!;
+
+  expect(leftSidebar.style.width).toBe(`${leftWidth}px`);
+  expect(canvasContainer.style.marginLeft).toBe(`${leftWidth}px`);
+  expect(canvasContainer.style.width).toBe(`${Math.max(viewportWidth - leftWidth, 0)}px`);
+
+  const expectLayout = (open: boolean) => {
+    expect(rightSidebar.style.width).toBe(`${open ? rightWidth : 0}px`);
+    expect(canvas.style.marginRight).toBe(`${open ? rightWidth : 0}px`);
+    expect(canvas.style.width).toBe(
+      `${Math.max(viewportWidth - leftWidth - (open ? rightWidth : 0), 0)}px`,
+    );
+  };
+  await waitFor(() => expectLayout(initiallyOpen));
+  fireEvent.click(container.querySelector(`.${DESIGNER_CLASSNAME}sidebar-toggle`)!);
+  await waitFor(() => expectLayout(!initiallyOpen));
+  fireEvent.click(container.querySelector(`.${DESIGNER_CLASSNAME}sidebar-toggle`)!);
+  await waitFor(() => expectLayout(initiallyOpen));
+});
+
 test('Designer renders staticSchema multiVariableText without throwing', async () => {
   setupUIMock();
   mockStableUuids();
@@ -875,7 +928,11 @@ const addSchemaFromSidebar = (container: HTMLElement, type: string) => {
   fireEvent.pointerUp(document, { ...pointer, clientX: 180, clientY: 180 });
 };
 
-const mountPublicDesigner = async (template: Template, designerPlugins: Plugins = plugins) => {
+const mountPublicDesigner = async (
+  template: Template,
+  designerPlugins: Plugins = plugins,
+  onCreate?: (designer: PublicDesigner) => void,
+) => {
   const originalResizeObserver = globalThis.ResizeObserver;
   globalThis.ResizeObserver = class {
     observe() {}
@@ -894,6 +951,8 @@ const mountPublicDesigner = async (template: Template, designerPlugins: Plugins 
     template,
     plugins: designerPlugins,
   });
+  // The first render is only committed inside the next act(), so this runs before mount.
+  onCreate?.(designer);
   await act(async () => {
     designer.updateTemplate(template);
   });
@@ -1652,4 +1711,548 @@ test('selecting expand text on a non-blank PDF rewrites overflow without touchin
   } finally {
     cleanup();
   }
+});
+
+test('Designer resolves {currentPage} in read-only fields to the page number', async () => {
+  setupUIMock(2);
+  mockStableUuids();
+  const template = getTwoPageTemplate();
+  template.schemas[1] = [
+    {
+      name: 'pageLabel',
+      type: 'text',
+      content: '{currentPage}/{totalPages}',
+      readOnly: true,
+      position: { x: 20, y: 20 },
+      width: 100,
+      height: 15,
+    },
+  ];
+  const { container } = render(
+    <I18nContext.Provider value={i18n}>
+      <FontContext.Provider value={getDefaultFont()}>
+        <PluginsRegistry.Provider value={pluginRegistry(plugins)}>
+          <Designer
+            template={template}
+            onSaveTemplate={console.log}
+            onChangeTemplate={console.log}
+            size={{ width: 1200, height: 1200 }}
+            onPageCursorChange={() => undefined}
+          />
+        </PluginsRegistry.Provider>
+      </FontContext.Provider>
+    </I18nContext.Provider>,
+  );
+
+  // page 1 holds two fields: the schema's index across pages would give "3/2"
+  expect(template.schemas[0].length).toBe(2);
+  await waitFor(() => {
+    expect(getSelectableByTitle(container, 'pageLabel')).toHaveTextContent('2/2');
+  });
+});
+
+const barcodePlugins = { ...plugins, qrcode: barcodes.qrcode, code128: barcodes.code128 };
+
+const getBarcodeResizeTemplate = (type: 'qrcode' | 'code128'): Template => ({
+  basePdf: BLANK_A4_PDF,
+  schemas: [
+    [
+      {
+        name: 'field1',
+        type,
+        content: type === 'qrcode' ? 'https://pdfme.com/' : 'ABC-123',
+        position: { x: 10, y: 10 },
+        width: 30,
+        height: 30,
+        backgroundColor: '#ffffff',
+        barColor: '#000000',
+      },
+    ],
+  ],
+});
+
+const selectBarcodeField = async (domContainer: HTMLElement) => {
+  await waitFor(() => {
+    expect(domContainer.querySelector('[title="field1"]')).toBeTruthy();
+  });
+  clickFieldInList(domContainer, 'field1');
+  await waitFor(() => {
+    expect(domContainer.querySelectorAll(`.${DESIGNER_CLASSNAME}delete-button`)).toHaveLength(1);
+  });
+};
+
+test('QR codes keep a square box when resized without Shift', async () => {
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  const { designer, domContainer, cleanup } = await mountPublicDesigner(
+    getBarcodeResizeTemplate('qrcode'),
+    barcodePlugins,
+  );
+
+  try {
+    await selectBarcodeField(domContainer);
+    await resizeSelectedField();
+
+    await waitFor(() => {
+      const field = designer.getTemplate().schemas[0][0];
+      expect(field.width).not.toBe(30);
+      expect(field.width).toBe(field.height);
+    });
+  } finally {
+    cleanup();
+  }
+});
+
+test('Moveable keeps the box ratio for plugins that define getAspectRatio', async () => {
+  // getAspectRatio returns undefined so changeSchemas does not snap; any kept ratio
+  // must come from Moveable's keepRatio during the drag.
+  const lockedText: Plugin = {
+    ...text,
+    propPanel: {
+      ...text.propPanel,
+      defaultSchema: { ...text.propPanel.defaultSchema, type: 'lockedText' },
+    },
+    getAspectRatio: () => undefined,
+  };
+  const template: Template = {
+    basePdf: BLANK_A4_PDF,
+    schemas: [[{ ...textField('field1', 'hello'), type: 'lockedText', width: 45, height: 10 }]],
+  };
+  const { designer, domContainer, cleanup } = await mountPublicDesigner(template, {
+    ...plugins,
+    lockedText,
+  });
+
+  try {
+    await selectBarcodeField(domContainer);
+    await resizeSelectedField();
+
+    await waitFor(() => {
+      const field = designer.getTemplate().schemas[0][0];
+      expect(field.width).not.toBe(45);
+      expect(field.width / field.height).toBeCloseTo(4.5, 1);
+    });
+  } finally {
+    cleanup();
+  }
+});
+
+test('1D barcodes resize freely', async () => {
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  const { designer, domContainer, cleanup } = await mountPublicDesigner(
+    getBarcodeResizeTemplate('code128'),
+    barcodePlugins,
+  );
+
+  try {
+    await selectBarcodeField(domContainer);
+    await resizeSelectedField();
+
+    await waitFor(() => {
+      const field = designer.getTemplate().schemas[0][0];
+      expect(field.width).not.toBe(30);
+      expect(uiHelper.round(field.width / field.height, 2)).not.toBe(1);
+    });
+  } finally {
+    cleanup();
+  }
+});
+
+describe('onChangeSelection (#1691)', () => {
+  const flushRender = () =>
+    act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+  test('does not notify on mount or on re-renders that keep the selection', async () => {
+    const selections: number[] = [];
+    const { designer, cleanup } = await mountPublicDesigner(
+      getResizeFieldTemplate(),
+      plugins,
+      (created) => created.onChangeSelection(({ schemas }) => selections.push(schemas.length)),
+    );
+
+    try {
+      await flushRender();
+      expect(selections).toEqual([]);
+
+      for (let i = 0; i < 3; i++) {
+        await act(async () => {
+          designer.updateOptions({});
+        });
+      }
+      expect(selections).toEqual([]);
+
+      await act(async () => {
+        designer.selectSchemas('field1');
+      });
+      await waitFor(() => expect(selections).toEqual([1]));
+
+      for (let i = 0; i < 3; i++) {
+        await act(async () => {
+          designer.updateOptions({});
+        });
+      }
+      expect(selections).toEqual([1]);
+      expect(designer.getSelectedSchemas().map(({ name }) => name)).toEqual(['field1']);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test('notifies once when the page changes without a selection', async () => {
+    const selections: Array<{ pageIndex: number; count: number }> = [];
+    const { designer, domContainer, cleanup } = await mountPublicDesigner(
+      getTwoPageTemplate(),
+      plugins,
+      (created) =>
+        created.onChangeSelection(({ pageIndex, schemas }) =>
+          selections.push({ pageIndex, count: schemas.length }),
+        ),
+    );
+
+    try {
+      await waitFor(() => expect(domContainer).toHaveTextContent('1/2'));
+      expect(selections).toEqual([]);
+
+      fireEvent.click(domContainer.querySelector('.pdfme-ui-page-next')!);
+      await waitFor(() => expect(designer.getPageCursor()).toBe(1));
+      await flushRender();
+      expect(selections).toEqual([{ pageIndex: 1, count: 0 }]);
+
+      await act(async () => {
+        designer.updateOptions({});
+      });
+      expect(selections).toEqual([{ pageIndex: 1, count: 0 }]);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test('notifies again when the selected schema changes', async () => {
+    const { designer, domContainer, cleanup } = await mountPublicDesigner(getResizeFieldTemplate());
+    const fontSizes: Array<number | undefined> = [];
+    designer.onChangeSelection(({ schemas }) => {
+      fontSizes.push((schemas[0]?.schema as { fontSize?: number } | undefined)?.fontSize);
+    });
+
+    try {
+      await selectField1(domContainer);
+      const notificationsAfterSelect = fontSizes.length;
+      expect(notificationsAfterSelect).toBe(1);
+
+      emitFormWatch({ fontSize: 20 });
+      await waitFor(() => expect(fontSizes.at(-1)).toBe(20));
+      expect(fontSizes).toHaveLength(notificationsAfterSelect + 1);
+
+      await act(async () => {
+        designer.selectSchemas([]);
+      });
+      await waitFor(() => expect(fontSizes.at(-1)).toBeUndefined());
+      expect(designer.getSelectedSchemas()).toEqual([]);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test('notifies when undo changes the selected schema', async () => {
+    const { designer, domContainer, cleanup } = await mountPublicDesigner(getResizeFieldTemplate());
+    const fontSizes: Array<number | undefined> = [];
+    designer.onChangeSelection(({ schemas }) => {
+      fontSizes.push((schemas[0]?.schema as { fontSize?: number } | undefined)?.fontSize);
+    });
+
+    try {
+      await selectField1(domContainer);
+      const originalFontSize = fontSizes.at(-1);
+      expect(originalFontSize).not.toBe(20);
+
+      emitFormWatch({ fontSize: 20 });
+      await waitFor(() => expect(fontSizes.at(-1)).toBe(20));
+      const notificationsAfterEdit = fontSizes.length;
+
+      pressShortcut('z');
+      await waitFor(() => expect(fontSizes.at(-1)).toBe(originalFontSize));
+      expect(fontSizes).toHaveLength(notificationsAfterEdit + 1);
+      expect(designer.getSelectedSchemas().map(({ name }) => name)).toEqual(['field1']);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test('a callback that calls updateOptions does not loop', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { designer, cleanup } = await mountPublicDesigner(getResizeFieldTemplate());
+    let calls = 0;
+    designer.onChangeSelection(({ schemas }) => {
+      calls++;
+      // Bound the loop so a regression fails instead of hanging the worker.
+      if (calls > 20) return;
+      designer.updateOptions({ sidebarOpen: schemas.length > 0 });
+    });
+
+    try {
+      await act(async () => {
+        designer.selectSchemas('field1');
+      });
+      await flushRender();
+      expect(calls).toBe(1);
+      expect(designer.getSelectedSchemas()).toHaveLength(1);
+      expect(
+        errorSpy.mock.calls.some((args) => String(args[0]).includes('Maximum update depth')),
+      ).toBe(false);
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+describe('re-rendering keeps the editing session (#1691)', () => {
+  const flushRender = () =>
+    act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+  const getSyncHeightTemplate = (): Template => ({
+    basePdf: BLANK_A4_PDF,
+    schemas: [
+      [
+        { ...textField('field1', 'hello'), width: 45, height: 10 },
+        { ...syncHeightPlugin.propPanel.defaultSchema, position: { x: 10, y: 60 } },
+      ],
+    ],
+  });
+
+  const mountAfterHeightSync = async (onCreate?: (designer: PublicDesigner) => void) => {
+    const mounted = await mountPublicDesigner(getSyncHeightTemplate(), syncHeightPlugins, onCreate);
+    await waitFor(() => {
+      expect(heightOfType(mounted.designer.getTemplate(), 'syncHeight')).toBe(SYNCED_HEIGHT);
+      expect(mounted.domContainer.querySelector('[title="field1"]')).toBeTruthy();
+    });
+    return mounted;
+  };
+
+  test('updateOptions after a renderer height sync keeps the selection and schema ids', async () => {
+    const { designer, domContainer, cleanup } = await mountAfterHeightSync();
+
+    try {
+      const field1Id = domContainer.querySelector('[title="field1"]')!.id;
+      await act(async () => {
+        designer.selectSchemas('field1');
+      });
+      await waitFor(() => expect(designer.getSelectedSchemas()).toHaveLength(1));
+      expect(designer.getSelectedSchemas()[0].schemaId).toBe(field1Id);
+
+      await act(async () => {
+        designer.updateOptions({});
+      });
+      await flushRender();
+
+      expect(designer.getSelectedSchemas().map(({ name, schemaId }) => [name, schemaId])).toEqual([
+        ['field1', field1Id],
+      ]);
+      expect(domContainer.querySelector('[title="field1"]')!.id).toBe(field1Id);
+      expect(domContainer.querySelectorAll(`.${DESIGNER_CLASSNAME}delete-button`)).toHaveLength(1);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test('the first click survives a callback that calls updateOptions', async () => {
+    const selections: string[][] = [];
+    const { designer, domContainer, cleanup } = await mountAfterHeightSync((created) =>
+      created.onChangeSelection(({ schemas }) => {
+        selections.push(schemas.map(({ name }) => name));
+        created.updateOptions({ sidebarOpen: schemas.length > 0 });
+      }),
+    );
+
+    try {
+      clickFieldInList(domContainer, 'field1');
+      await waitFor(() => expect(selections).toEqual([['field1']]));
+      await flushRender();
+
+      expect(selections).toEqual([['field1']]);
+      expect(designer.getSelectedSchemas().map(({ name }) => name)).toEqual(['field1']);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test('updateOptions after an edit keeps schema ids and undo history', async () => {
+    const { designer, domContainer, cleanup } = await mountPublicDesigner(getResizeFieldTemplate());
+
+    try {
+      await selectField1(domContainer);
+      const field1Id = designer.getSelectedSchemas()[0].schemaId;
+
+      emitFormWatch({ fontSize: 20 });
+      await waitFor(() => expect(designer.getTemplate().schemas[0][0].fontSize).toBe(20));
+
+      await act(async () => {
+        designer.updateOptions({ zoomLevel: 1 });
+      });
+      await flushRender();
+      expect(designer.getSelectedSchemas().map(({ schemaId }) => schemaId)).toEqual([field1Id]);
+
+      pressShortcut('z');
+      await waitFor(() => expect(designer.getTemplate().schemas[0][0].fontSize).toBe(13));
+      expect(designer.getSelectedSchemas().map(({ schemaId }) => schemaId)).toEqual([field1Id]);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test('updateTemplate still replaces the document and clears the selection', async () => {
+    const { designer, cleanup } = await mountAfterHeightSync();
+
+    try {
+      await act(async () => {
+        designer.selectSchemas('field1');
+      });
+      await waitFor(() => expect(designer.getSelectedSchemas()).toHaveLength(1));
+
+      await act(async () => {
+        designer.updateTemplate(getOnePageBlankTemplate());
+      });
+      await flushRender();
+
+      expect(designer.getSelectedSchemas()).toEqual([]);
+      expect(namesByPage(designer.getTemplate())).toEqual([['field1']]);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test('a page added in the editor stays rendered when the canvas size changes', async () => {
+    const { domContainer, cleanup } = await mountPublicDesigner(getOnePageBlankTemplate());
+
+    try {
+      await waitFor(() => {
+        expect(domContainer.querySelector('[title="field1"]')).toBeTruthy();
+      });
+      await clickControl(domContainer, '.pdfme-ui-context-menu', 'Add Page After');
+      await waitFor(() => expect(domContainer).toHaveTextContent('2/2'));
+
+      fireEvent.click(domContainer.querySelector(`.${DESIGNER_CLASSNAME}sidebar-toggle`)!);
+      await flushRender();
+
+      expect(domContainer).toHaveTextContent('2/2');
+      expect(domContainer.querySelector('[title="field1"]')).toBeTruthy();
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+describe('options.sidebarOpen', () => {
+  const getSidebar = (domContainer: HTMLElement) =>
+    domContainer.querySelector(`.${DESIGNER_CLASSNAME}right-sidebar`) as HTMLDivElement;
+  const toggleSidebar = (domContainer: HTMLElement) =>
+    fireEvent.click(domContainer.querySelector(`.${DESIGNER_CLASSNAME}sidebar-toggle`)!);
+  const OPEN = `${RIGHT_SIDEBAR_WIDTH}px`;
+  const CLOSED = '0px';
+
+  test('reopens a sidebar the user closed when the same value is set again', async () => {
+    const { designer, domContainer, cleanup } = await mountPublicDesigner(
+      getOnePageBlankTemplate(),
+      plugins,
+      (created) => created.updateOptions({ sidebarOpen: true }),
+    );
+
+    try {
+      await waitFor(() => expect(getSidebar(domContainer).style.width).toBe(OPEN));
+      toggleSidebar(domContainer);
+      await waitFor(() => expect(getSidebar(domContainer).style.width).toBe(CLOSED));
+
+      await act(async () => {
+        designer.updateOptions({ sidebarOpen: true });
+      });
+      expect(getSidebar(domContainer).style.width).toBe(OPEN);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test('closes a sidebar the user opened when the same value is set again', async () => {
+    const { designer, domContainer, cleanup } = await mountPublicDesigner(
+      getOnePageBlankTemplate(),
+      plugins,
+      (created) => created.updateOptions({ sidebarOpen: false }),
+    );
+
+    try {
+      await waitFor(() => expect(getSidebar(domContainer).style.width).toBe(CLOSED));
+      toggleSidebar(domContainer);
+      await waitFor(() => expect(getSidebar(domContainer).style.width).toBe(OPEN));
+
+      await act(async () => {
+        designer.updateOptions({ sidebarOpen: false });
+      });
+      expect(getSidebar(domContainer).style.width).toBe(CLOSED);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test('re-renders and unrelated option updates keep the user toggle', async () => {
+    const { designer, domContainer, cleanup } = await mountPublicDesigner(
+      getOnePageBlankTemplate(),
+      plugins,
+      (created) => created.updateOptions({ sidebarOpen: true }),
+    );
+
+    try {
+      await waitFor(() => expect(getSidebar(domContainer).style.width).toBe(OPEN));
+      toggleSidebar(domContainer);
+      await waitFor(() => expect(getSidebar(domContainer).style.width).toBe(CLOSED));
+
+      await act(async () => {
+        designer.updateOptions({});
+      });
+      await act(async () => {
+        designer.updateOptions({ requiredByDefault: true });
+      });
+      await act(async () => {
+        designer.updateTemplate(getOnePageBlankTemplate());
+      });
+      expect(designer.getOptions().sidebarOpen).toBe(true);
+      expect(getSidebar(domContainer).style.width).toBe(CLOSED);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test('an onChangeSelection callback can reopen the sidebar for each new selection (#1691)', async () => {
+    const template: Template = {
+      basePdf: BLANK_A4_PDF,
+      schemas: [[textField('field1'), { ...textField('field2'), position: { x: 20, y: 60 } }]],
+    };
+    const { designer, domContainer, cleanup } = await mountPublicDesigner(
+      template,
+      plugins,
+      (created) =>
+        created.onChangeSelection(({ schemas }) => {
+          created.updateOptions({ sidebarOpen: schemas.length > 0 });
+        }),
+    );
+
+    try {
+      await waitFor(() => expect(domContainer.querySelector('[title="field2"]')).toBeTruthy());
+      await act(async () => {
+        designer.selectSchemas('field1');
+      });
+      await waitFor(() => expect(getSidebar(domContainer).style.width).toBe(OPEN));
+
+      toggleSidebar(domContainer);
+      await waitFor(() => expect(getSidebar(domContainer).style.width).toBe(CLOSED));
+
+      await act(async () => {
+        designer.selectSchemas('field2');
+      });
+      await waitFor(() => expect(getSidebar(domContainer).style.width).toBe(OPEN));
+      expect(designer.getSelectedSchemas().map(({ name }) => name)).toEqual(['field2']);
+    } finally {
+      cleanup();
+    }
+  });
 });
